@@ -94,7 +94,7 @@ POST /api/v1/monitors
 | `config.check_interval_sec` | int | - | 10 | セグメント解析間隔（秒） |
 | `config.blackout_threshold_sec` | int | - | 30 | ブラックアウト判定閾値（秒） |
 | `config.silence_threshold_sec` | int | - | 30 | 無音判定閾値（秒） |
-| `config.silence_db_threshold` | float | - | -50 | 無音判定の音量閾値 |
+| `config.silence_db_threshold` | float | - | -50 | 無音判定の音量閾値（dB） |
 | `config.scheduled_start_time` | string | - | null | 予定開始時刻（ISO 8601形式） |
 | `config.start_delay_tolerance_sec` | int | - | 300 | 開始遅延許容時間（秒） |
 | `metadata` | object | - | {} | コールバック時に含める任意のメタデータ |
