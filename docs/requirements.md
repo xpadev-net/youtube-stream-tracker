@@ -114,7 +114,7 @@ POST /api/v1/monitors
 
 ```json
 {
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "status": "initializing",
   "created_at": "2024-01-15T19:55:00+09:00"
 }
@@ -122,13 +122,12 @@ POST /api/v1/monitors
 
 #### monitor_id形式
 
-| 項目 | 値 |
-| ---- | -- |
-| 形式 | `mon_` + UUIDv7（ハイフンなし） |
-| 例 | `mon_0190a5c8e4b07d8a9c1d2e3f4a5b6c7d` |
-| 生成方式 | UUIDv7（タイムスタンプ順でソート可能） |
+| 項目 | 値 | 説明 |
+| ---- | -- | ---- |
+| 形式 | `mon-` + UUIDv7（ハイフンなし） | DNS-1123準拠（ハイフンのみ許可） |
+| 例 | `mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d` | Pod、環境変数、APIレスポンス全で統一 |
 
-※ 内部的にはUUIDv7をそのまま使用し、外部公開時に`mon_`プレフィックスを付与する
+※ `mon-`プレフィックスはDNS-1123制約に準拠し、内部・外部で統一。UUIDv7のためタイムスタンプ順でソート可能。
 
 ### 3.2 監視停止 API
 
@@ -263,7 +262,7 @@ GET /api/v1/monitors
 ```json
 {
   "event_type": "alert.blackout",
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "stream_url": "https://www.youtube.com/watch?v=XXXXXXXXXXX",
   "timestamp": "2024-01-15T20:15:30+09:00",
   "data": {
@@ -741,10 +740,10 @@ GET https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=XXX&forma
 apiVersion: v1
 kind: Pod
 metadata:
-  name: stream-monitor-{monitor_id}
+  name: stream-monitor-{internal_monitor_id}  # 例: stream-monitor-mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
   labels:
     app: stream-monitor
-    monitor-id: "{monitor_id}"
+    monitor-id: "{internal_monitor_id}"      # 例: mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
 spec:
   volumes:
     - name: workdir
@@ -764,7 +763,7 @@ spec:
           cpu: "500m"
       env:
         - name: MONITOR_ID
-          value: "{monitor_id}"
+          value: "{internal_monitor_id}"    # 例: mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
         - name: STREAM_URL
           value: "{stream_url}"
         - name: CALLBACK_URL
@@ -915,21 +914,23 @@ PUT /internal/v1/monitors/{monitor_id}/status
 
 | カラム名 | 型 | 制約 | 説明 |
 | -------- | -- | ---- | ---- |
-| id | UUID | PK | UUIDv7形式（mon_プレフィックス付きで外部公開） |
+| id | VARCHAR(37) | PK | `mon-` + UUIDv7形式（DNS-1123準拠、Pod名・API全で統一） |
 | stream_url | VARCHAR(512) | NOT NULL | YouTube配信URL |
 | callback_url | VARCHAR(512) | NOT NULL | Webhookコールバック先URL |
 | config | JSONB | NOT NULL | 監視設定（閾値等） |
 | metadata | JSONB | | ユーザー定義メタデータ |
 | status | VARCHAR(20) | NOT NULL | initializing/waiting/monitoring/completed/stopped/error |
-| pod_name | VARCHAR(63) | | 対応するKubernetes Pod名 |
+| pod_name | VARCHAR(63) | | 対応するKubernetes Pod名（例: `stream-monitor-mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d`） |
 | created_at | TIMESTAMPTZ | NOT NULL | 作成日時 |
 | updated_at | TIMESTAMPTZ | NOT NULL | 更新日時 |
+
+※ idカラムは`mon-`プレフィックス付きで、Pod名・環境変数・APIレスポンスで統一使用。
 
 #### monitor_stats テーブル
 
 | カラム名 | 型 | 制約 | 説明 |
 | -------- | -- | ---- | ---- |
-| monitor_id | UUID | PK, FK | monitors.id への外部キー |
+| monitor_id | VARCHAR(37) | PK, FK | monitors.id への外部キー |
 | total_segments | INT | NOT NULL DEFAULT 0 | 解析済みセグメント数 |
 | blackout_events | INT | NOT NULL DEFAULT 0 | ブラックアウト検出回数 |
 | silence_events | INT | NOT NULL DEFAULT 0 | 無音検出回数 |
@@ -940,7 +941,7 @@ PUT /internal/v1/monitors/{monitor_id}/status
 | カラム名 | 型 | 制約 | 説明 |
 | -------- | -- | ---- | ---- |
 | id | UUID | PK | UUIDv7形式 |
-| monitor_id | UUID | FK, NOT NULL | monitors.id への外部キー |
+| monitor_id | VARCHAR(37) | FK, NOT NULL | monitors.id への外部キー |
 | event_type | VARCHAR(50) | NOT NULL | イベント種別（stream.started, alert.blackout等） |
 | payload | JSONB | NOT NULL | Webhookに送信したペイロード全体 |
 | webhook_status | VARCHAR(20) | NOT NULL | pending/sent/failed |
@@ -1455,9 +1456,9 @@ spec:
     - **決定**: タイムスタンプが現在時刻から±5分以内であることを検証。範囲外はリクエスト拒否。
     - **理由**: セキュリティ強化のためのリプレイ攻撃対策。
 
-27. **monitor_id形式**
-    - **決定**: UUIDv7を使用し、外部公開時は`mon_`プレフィックスを付与。
-    - **理由**: タイムスタンプ順でソート可能かつ一意性を保証。
+27. **monitor_id形式（DNS-1123準拠）**
+    - **決定**: `mon-` + UUIDv7（ハイフンのみで統一）。Pod名・環境変数・APIレスポンス・Webhookペイロードで全て同一形式を使用。
+    - **理由**: KubernetesのDNS-1123制約（ハイフンのみ許可）に準拠し、内外で統一することで、スキーマをシンプル化。UUIDv7のためタイムスタンプ順でソート可能。
 
 28. **ログレベルデフォルト**
     - **決定**: デフォルトは`info`。環境変数`LOG_LEVEL`で変更可能。
