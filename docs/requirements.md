@@ -141,7 +141,7 @@ DELETE /api/v1/monitors/{monitor_id}
 
 ```json
 {
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "status": "stopped",
   "stopped_at": "2024-01-15T21:30:00+09:00"
 }
@@ -159,7 +159,7 @@ GET /api/v1/monitors/{monitor_id}
 
 ```json
 {
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "stream_url": "https://www.youtube.com/watch?v=XXXXXXXXXXX",
   "status": "monitoring",
   "stream_status": "live",
@@ -187,11 +187,11 @@ GET /api/v1/monitors
 
 #### クエリパラメータ
 
-| パラメータ | 型     | 説明                                                       |
-| ---------- | ------ | ---------------------------------------------------------- |
-| `status`   | string | フィルタ: `initializing`, `monitoring`, `stopped`, `error` |
-| `limit`    | int    | 取得件数上限（デフォルト: 50）                             |
-| `offset`   | int    | オフセット                                                 |
+| パラメータ | 型     | 説明                                                                                        |
+| ---------- | ------ | ------------------------------------------------------------------------------------------- |
+| `status`   | string | フィルタ: `initializing`, `waiting`, `monitoring`, `completed`, `stopped`, `error` |
+| `limit`    | int    | 取得件数上限（デフォルト: 50）                                                              |
+| `offset`   | int    | オフセット                                                                                  |
 
 #### レスポンス
 
@@ -199,7 +199,7 @@ GET /api/v1/monitors
 {
   "monitors": [
     {
-      "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+      "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
       "stream_url": "https://www.youtube.com/watch?v=XXXXXXXXXXX",
       "status": "monitoring",
       "created_at": "2024-01-15T19:55:00+09:00"
@@ -740,10 +740,10 @@ GET https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=XXX&forma
 apiVersion: v1
 kind: Pod
 metadata:
-  name: stream-monitor-{internal_monitor_id}  # 例: stream-monitor-mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
+  name: stream-monitor-{monitor_id}  # 例: stream-monitor-mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
   labels:
     app: stream-monitor
-    monitor-id: "{internal_monitor_id}"      # 例: mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
+    monitor-id: "{monitor_id}"       # 例: mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
 spec:
   volumes:
     - name: workdir
@@ -763,7 +763,7 @@ spec:
           cpu: "500m"
       env:
         - name: MONITOR_ID
-          value: "{internal_monitor_id}"    # 例: mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
+          value: "{monitor_id}"      # 例: mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
         - name: STREAM_URL
           value: "{stream_url}"
         - name: CALLBACK_URL
@@ -1028,7 +1028,7 @@ API Gatewayが再起動した場合、データベース上の監視状態と実
 ```json
 {
   "event_type": "monitor.error",
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "timestamp": "2024-01-15T20:15:30+09:00",
   "data": {
     "reason": "reconciliation_mismatch",
@@ -1061,7 +1061,7 @@ API Gatewayが再起動した場合、データベース上の監視状態と実
 {
   "timestamp": "2024-01-15T20:15:30.123+09:00",
   "level": "INFO",
-  "monitor_id": "mon_xxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "component": "segment_analyzer",
   "message": "Blackout detected",
   "data": {
