@@ -114,11 +114,20 @@ POST /api/v1/monitors
 
 ```json
 {
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "status": "initializing",
   "created_at": "2024-01-15T19:55:00+09:00"
 }
 ```
+
+#### monitor_id形式
+
+| 項目 | 値 | 説明 |
+| ---- | -- | ---- |
+| 形式 | `mon-` + UUIDv7（ハイフンなし） | DNS-1123準拠（ハイフンのみ許可） |
+| 例 | `mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d` | Pod、環境変数、APIレスポンス全で統一 |
+
+※ `mon-`プレフィックスはDNS-1123制約に準拠し、内部・外部で統一。UUIDv7のためタイムスタンプ順でソート可能。
 
 ### 3.2 監視停止 API
 
@@ -132,7 +141,7 @@ DELETE /api/v1/monitors/{monitor_id}
 
 ```json
 {
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "status": "stopped",
   "stopped_at": "2024-01-15T21:30:00+09:00"
 }
@@ -150,7 +159,7 @@ GET /api/v1/monitors/{monitor_id}
 
 ```json
 {
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "stream_url": "https://www.youtube.com/watch?v=XXXXXXXXXXX",
   "status": "monitoring",
   "stream_status": "live",
@@ -178,11 +187,11 @@ GET /api/v1/monitors
 
 #### クエリパラメータ
 
-| パラメータ | 型     | 説明                                                       |
-| ---------- | ------ | ---------------------------------------------------------- |
-| `status`   | string | フィルタ: `initializing`, `monitoring`, `stopped`, `error` |
-| `limit`    | int    | 取得件数上限（デフォルト: 50）                             |
-| `offset`   | int    | オフセット                                                 |
+| パラメータ | 型     | 説明                                                                                        |
+| ---------- | ------ | ------------------------------------------------------------------------------------------- |
+| `status`   | string | フィルタ: `initializing`, `waiting`, `monitoring`, `completed`, `stopped`, `error` |
+| `limit`    | int    | 取得件数上限（デフォルト: 50）                                                              |
+| `offset`   | int    | オフセット                                                                                  |
 
 #### レスポンス
 
@@ -190,7 +199,7 @@ GET /api/v1/monitors
 {
   "monitors": [
     {
-      "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+      "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
       "stream_url": "https://www.youtube.com/watch?v=XXXXXXXXXXX",
       "status": "monitoring",
       "created_at": "2024-01-15T19:55:00+09:00"
@@ -253,7 +262,7 @@ GET /api/v1/monitors
 ```json
 {
   "event_type": "alert.blackout",
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "stream_url": "https://www.youtube.com/watch?v=XXXXXXXXXXX",
   "timestamp": "2024-01-15T20:15:30+09:00",
   "data": {
@@ -395,26 +404,58 @@ yt-dlp \
 │  2. セグメントダウンロード（.ts / .m4s）                          │
 │         │                                                        │
 │         ▼                                                        │
-│  3. 整合性チェック（シーケンス番号）                               │
+│  3. 映像解析（FFmpeg blackdetect）                                │
 │         │                                                        │
 │         ▼                                                        │
-│  4. 映像解析（FFmpeg blackdetect）                                │
+│  4. 音声解析（FFmpeg silencedetect）                              │
 │         │                                                        │
 │         ▼                                                        │
-│  5. 音声解析（FFmpeg silencedetect）                              │
+│  5. 結果統合・異常判定                                            │
 │         │                                                        │
 │         ▼                                                        │
-│  6. 結果統合・異常判定                                            │
+│  6. 異常検出時 → Webhook送信                                      │
 │         │                                                        │
 │         ▼                                                        │
-│  7. 異常検出時 → Webhook送信                                      │
+│  7. 次の解析サイクルへ（check_interval_sec待機）                   │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ※ 各解析処理は順次実行される（並列実行しない）
 
-### 6.2 映像解析（ブラックアウト検出）
+### 6.2 解析サイクルの実行制御
+
+解析処理が `check_interval_sec` を超過した場合の動作を以下のように定義する。
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    解析サイクル実行制御                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  [解析開始] ──▶ [解析処理中] ──▶ [解析完了]                       │
+│       │              │              │                            │
+│       │         経過時間 < interval │                            │
+│       │              │              ▼                            │
+│       │              │     [interval経過まで待機]                │
+│       │              │              │                            │
+│       │         経過時間 >= interval                             │
+│       │              │              │                            │
+│       │              ▼              ▼                            │
+│       └────────[次のサイクル開始]◀──┘                            │
+│                      │                                           │
+│             マニフェスト取得 → セグメント取得 → 解析              │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+| 条件 | 動作 |
+| ---- | ---- |
+| 解析時間 < check_interval_sec | interval経過まで待機後、次のサイクル開始 |
+| 解析時間 >= check_interval_sec | 解析完了後、即座に次のサイクル開始（待機なし） |
+
+※ 解析処理が完了するまで次のマニフェスト取得は行わない（バックプレッシャー制御）
+
+### 6.3 映像解析（ブラックアウト検出）
 
 #### 解析手法
 
@@ -443,7 +484,7 @@ if (黒画面状態から復旧) {
 }
 ```
 
-### 6.3 音声解析（無音検出）
+### 6.4 音声解析（無音検出）
 
 #### 解析手法
 
@@ -471,15 +512,16 @@ if (無音状態から復旧) {
 }
 ```
 
-### 6.4 セグメント整合性チェック
+### 6.5 セグメント整合性チェック
 
-| チェック項目           | 説明                               |
-| ---------------------- | ---------------------------------- |
-| シーケンス番号の連続性 | セグメント欠落の検出               |
-| セグメント取得可否     | ネットワークエラー・配信終了の検出 |
-| セグメント長の妥当性   | 異常に短い/長いセグメントの検出    |
+| チェック項目         | 説明                               |
+| -------------------- | ---------------------------------- |
+| セグメント取得可否   | ネットワークエラー・配信終了の検出 |
+| セグメント長の妥当性 | 異常に短い/長いセグメントの検出    |
 
-### 6.5 セグメントエラー発火条件
+※ シーケンス番号の追跡は行わない（最新セグメントのみを対象とするため）
+
+### 6.6 セグメントエラー発火条件
 
 | 項目         | 値                                                  |
 | ------------ | --------------------------------------------------- |
@@ -487,7 +529,7 @@ if (無音状態から復旧) {
 | 発火イベント | `alert.segment_error`                               |
 | 説明         | セグメント取得失敗が1分間継続した場合にイベント発火 |
 
-### 6.6 一時ファイル管理
+### 6.7 一時ファイル管理
 
 #### 保存先
 
@@ -507,13 +549,65 @@ if (無音状態から復旧) {
 
 ## 7. 配信開始忘れ検出仕様
 
-### 7.1 検出ロジック
+### 7.1 Worker動作モード
+
+Workerは配信の状態に応じて以下の2つのモードで動作する。同一Pod内でモード遷移を行う。
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Worker動作モード遷移                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  [Pod起動] ──▶ [Waiting Mode]                                   │
+│                     │                                            │
+│          yt-dlpでマニフェスト取得試行                             │
+│                     │                                            │
+│         ┌──────────┴──────────┐                                 │
+│         │                     │                                 │
+│    取得成功              取得失敗                                │
+│    (is_live=true)        (配信未開始/エラー)                     │
+│         │                     │                                 │
+│         ▼                     ▼                                 │
+│  [Monitoring Mode]    バックオフでリトライ                       │
+│  (セグメント解析)           │                                    │
+│         │              ┌────┴────┐                              │
+│         │         ネットワーク  配信未開始                       │
+│         │         エラー        │                               │
+│         │              │        ▼                               │
+│         │         リトライ  ポーリング継続                       │
+│         │              │   (30秒間隔)                           │
+│         │              │        │                               │
+│         │              └────────┘                               │
+│         ▼                                                        │
+│    [配信終了検出]                                                │
+│         │                                                        │
+│         ▼                                                        │
+│    [Pod終了]                                                     │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+| モード | 状態 | 動作 |
+| ------ | ---- | ---- |
+| Waiting Mode | 配信未開始 | yt-dlpでマニフェスト取得をポーリング（30秒間隔） |
+| Monitoring Mode | 配信中 | セグメント取得・解析を実行（check_interval_sec間隔） |
+
+### 7.2 マニフェスト取得失敗時の挙動
+
+| 失敗理由 | 判定方法 | 対応 |
+| -------- | -------- | ---- |
+| 配信未開始 | yt-dlpが「Premieres in」「Scheduled for」等を返す | Waiting Modeでポーリング継続 |
+| ネットワークエラー | タイムアウト、DNS解決失敗等 | 指数バックオフでリトライ（最大60秒間隔） |
+| 動画削除/非公開 | yt-dlpが「Video unavailable」を返す | `monitor.error`を発火しPod終了 |
+| 配信終了（アーカイブ） | `is_live=false` | `stream.ended`を発火しPod終了 |
+
+### 7.3 配信開始遅延検出ロジック
 
 ```
 scheduled_start_time が設定されている場合:
 
 1. 現在時刻が scheduled_start_time を過ぎたかチェック
-2. YouTube API / スクレイピングで配信状態を確認
+2. yt-dlpで配信状態を確認（is_liveフィールド）
 3. if (配信状態 != "live" && 経過時間 > start_delay_tolerance_sec) {
        → stream.delayed イベント発火
    }
@@ -522,7 +616,7 @@ scheduled_start_time が設定されている場合:
 yt-dlpのJSON dumpにある `is_live` フィールドを厳密にチェックし、配信ステータスが `live` でない場合は即座に終了（またはエラー）として扱う。アーカイブURLへの誤接続を防ぐ。
 ```
 
-### 7.2 配信状態の確認方法
+### 7.4 配信状態の確認方法
 
 #### 方法1: yt-dlp による確認
 
@@ -536,7 +630,7 @@ yt-dlp --dump-json "https://www.youtube.com/watch?v=XXX" 2>/dev/null | jq '.is_l
 GET https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=XXX&format=json
 ```
 
-### 7.3 ポーリング間隔
+### 7.5 ポーリング間隔
 
 | 状態           | ポーリング間隔             |
 | -------------- | -------------------------- |
@@ -544,24 +638,96 @@ GET https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=XXX&forma
 | 予定時刻超過後 | 10秒                       |
 | 配信開始検出後 | セグメント解析モードへ移行 |
 
-### 7.4 配信終了検出
+### 7.6 配信終了検出とセグメントエラーの判定
 
-監視中（monitoring状態）における配信終了は以下の方法で検出する。
+監視中（monitoring状態）における配信終了とエラーの判定フローを以下に示す。
 
-#### 検出方法
+#### 判定フローチャート
 
-| 方法               | 条件                       | 説明                                       |
-| ------------------ | -------------------------- | ------------------------------------------ |
-| HLSマニフェスト    | `EXT-X-ENDLIST` タグ検出   | マニフェストに終了タグが含まれる場合       |
-| セグメント更新停止 | 60秒以上新規セグメントなし | マニフェスト更新はあるが新セグメントがない |
-| yt-dlp確認         | `is_live` が `false`       | 定期的なステータスチェック（5分間隔）      |
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              配信終了 / セグメントエラー判定フロー                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  [マニフェスト取得試行]                                          │
+│         │                                                        │
+│    ┌────┴────┐                                                  │
+│  成功        失敗                                                │
+│    │          │                                                  │
+│    ▼          ▼                                                  │
+│  [EXT-X-ENDLIST   [リトライ（指数バックオフ）]                   │
+│   タグ存在?]            │                                        │
+│    │                    │                                        │
+│  ┌─┴─┐            失敗継続60秒?                                 │
+│ Yes   No                │                                        │
+│  │     │           ┌────┴────┐                                  │
+│  │     ▼          Yes        No                                  │
+│  │  [最新セグメント         │     │                              │
+│  │   取得試行]              │  リトライ継続                      │
+│  │     │                    │                                    │
+│  │  ┌──┴──┐                │                                    │
+│  │ 成功   失敗              │                                    │
+│  │  │      │                │                                    │
+│  │  ▼      ▼                │                                    │
+│  │ 解析  リトライ           │                                    │
+│  │ 継続  （指数バック       │                                    │
+│  │  │    オフ）             │                                    │
+│  │  │      │                │                                    │
+│  │  │  失敗継続60秒?        │                                    │
+│  │  │      │                │                                    │
+│  │  │   ┌──┴──┐            │                                    │
+│  │  │  Yes    No            │                                    │
+│  │  │   │   リトライ        │                                    │
+│  │  │   │   継続            │                                    │
+│  │  │   ▼                   ▼                                    │
+│  │  │  [yt-dlp is_live確認]                                      │
+│  │  │         │                                                  │
+│  │  │    ┌────┴────┐                                            │
+│  │  │  true       false                                          │
+│  │  │    │          │                                            │
+│  │  │    ▼          │                                            │
+│  │  │  [alert.      │                                            │
+│  │  │  segment_     │                                            │
+│  │  │  error発火]   │                                            │
+│  │  │    │          │                                            │
+│  │  │    ▼          │                                            │
+│  │  │  監視継続     │                                            │
+│  │  │  (状態維持)   │                                            │
+│  │  │               │                                            │
+│  ▼  │               ▼                                            │
+│  └──┴──▶ [stream.ended発火]                                     │
+│                 │                                                │
+│                 ▼                                                │
+│          [completed状態へ遷移]                                   │
+│                 │                                                │
+│                 ▼                                                │
+│          [Pod終了]                                               │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 判定優先順位
+
+| 優先度 | 条件 | 判定結果 | イベント |
+| ------ | ---- | -------- | -------- |
+| 1 | `EXT-X-ENDLIST`タグ検出 | 配信終了 | `stream.ended` |
+| 2 | `is_live=false` | 配信終了 | `stream.ended` |
+| 3 | セグメント取得失敗60秒継続 + `is_live=true` | エラー（配信継続中） | `alert.segment_error` |
+| 4 | マニフェスト取得失敗60秒継続 + `is_live=true` | エラー（配信継続中） | `alert.segment_error` |
+
+#### 定期的なis_liveチェック
+
+| 項目 | 値 |
+| ---- | -- |
+| チェック間隔 | 5分 |
+| 用途 | 配信終了の補助検出、エラー判定時の配信状態確認 |
 
 #### 終了検出時の動作
 
 ```
 1. `stream.ended` イベントを発火
 2. 監視状態を `completed` に遷移
-3. Worker Podを削除
+3. Worker Podを終了
 ```
 
 ---
@@ -574,10 +740,10 @@ GET https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=XXX&forma
 apiVersion: v1
 kind: Pod
 metadata:
-  name: stream-monitor-{monitor_id}
+  name: stream-monitor-{monitor_id}  # 例: stream-monitor-mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
   labels:
     app: stream-monitor
-    monitor-id: "{monitor_id}"
+    monitor-id: "{monitor_id}"       # 例: mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
 spec:
   volumes:
     - name: workdir
@@ -597,7 +763,7 @@ spec:
           cpu: "500m"
       env:
         - name: MONITOR_ID
-          value: "{monitor_id}"
+          value: "{monitor_id}"      # 例: mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d
         - name: STREAM_URL
           value: "{stream_url}"
         - name: CALLBACK_URL
@@ -677,7 +843,52 @@ Worker Podが停止シグナル（SIGTERM）を受信した際の動作。
 | 最大同時監視数 | 50件                                |
 | 上限超過時     | HTTP 429 (Too Many Requests) を返却 |
 
-### 8.6 ヘルスチェック
+### 8.6 Worker → API Gateway 状態同期
+
+WorkerはAPI Gatewayの内部APIを通じて状態を報告する。
+
+#### 内部API エンドポイント
+
+```
+PUT /internal/v1/monitors/{monitor_id}/status
+```
+
+#### リクエストボディ
+
+```json
+{
+  "status": "monitoring",
+  "health": {
+    "video": "ok",
+    "audio": "ok"
+  },
+  "statistics": {
+    "total_segments_analyzed": 150,
+    "blackout_events": 0,
+    "silence_events": 1
+  }
+}
+```
+
+#### 報告タイミング
+
+| イベント | 報告内容 |
+| -------- | -------- |
+| モード遷移時 | status変更（waiting → monitoring等） |
+| セグメント解析完了時 | statistics更新 |
+| 異常検出時 | health状態更新 |
+| 異常復旧時 | health状態更新 |
+
+#### 認証
+
+| 項目 | 値 |
+| ---- | -- |
+| 認証方式 | 内部API Key（環境変数 `INTERNAL_API_KEY`） |
+| ヘッダ | `X-Internal-API-Key: {key}` |
+
+※ 内部APIはClusterIP Serviceで公開し、外部からはアクセス不可とする
+
+### 8.7 ヘルスチェック
 
 #### エンドポイント
 
@@ -701,23 +912,58 @@ Worker Podが停止シグナル（SIGTERM）を受信した際の動作。
 
 #### monitors テーブル
 
-- id: UUID (PK)
-- stream_url: VARCHAR
-- callback_url: VARCHAR
-- config: JSONB
-- metadata: JSONB
-- status: VARCHAR (initializing|monitoring|stopped|error)
-- pod_name: VARCHAR
-- created_at: TIMESTAMPTZ
-- updated_at: TIMESTAMPTZ
+| カラム名 | 型 | 制約 | 説明 |
+| -------- | -- | ---- | ---- |
+| id | VARCHAR(37) | PK | `mon-` + UUIDv7形式（DNS-1123準拠、Pod名・API全で統一） |
+| stream_url | VARCHAR(512) | NOT NULL | YouTube配信URL |
+| callback_url | VARCHAR(512) | NOT NULL | Webhookコールバック先URL |
+| config | JSONB | NOT NULL | 監視設定（閾値等） |
+| metadata | JSONB | | ユーザー定義メタデータ |
+| status | VARCHAR(20) | NOT NULL | initializing/waiting/monitoring/completed/stopped/error |
+| pod_name | VARCHAR(63) | | 対応するKubernetes Pod名（例: `stream-monitor-mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d`） |
+| created_at | TIMESTAMPTZ | NOT NULL | 作成日時 |
+| updated_at | TIMESTAMPTZ | NOT NULL | 更新日時 |
+
+※ idカラムは`mon-`プレフィックス付きで、Pod名・環境変数・APIレスポンスで統一使用。
 
 #### monitor_stats テーブル
 
-- monitor_id: UUID (FK)
-- total_segments: INT
-- blackout_events: INT
-- silence_events: INT
-- last_check_at: TIMESTAMPTZ
+| カラム名 | 型 | 制約 | 説明 |
+| -------- | -- | ---- | ---- |
+| monitor_id | VARCHAR(37) | PK, FK | monitors.id への外部キー |
+| total_segments | INT | NOT NULL DEFAULT 0 | 解析済みセグメント数 |
+| blackout_events | INT | NOT NULL DEFAULT 0 | ブラックアウト検出回数 |
+| silence_events | INT | NOT NULL DEFAULT 0 | 無音検出回数 |
+| last_check_at | TIMESTAMPTZ | | 最終チェック日時 |
+
+#### monitor_events テーブル
+
+| カラム名 | 型 | 制約 | 説明 |
+| -------- | -- | ---- | ---- |
+| id | UUID | PK | UUIDv7形式 |
+| monitor_id | VARCHAR(37) | FK, NOT NULL | monitors.id への外部キー |
+| event_type | VARCHAR(50) | NOT NULL | イベント種別（stream.started, alert.blackout等） |
+| payload | JSONB | NOT NULL | Webhookに送信したペイロード全体 |
+| webhook_status | VARCHAR(20) | NOT NULL | pending/sent/failed |
+| webhook_attempts | INT | NOT NULL DEFAULT 0 | Webhook送信試行回数 |
+| webhook_last_error | TEXT | | 最後のWebhookエラー詳細 |
+| created_at | TIMESTAMPTZ | NOT NULL | イベント発生日時 |
+| sent_at | TIMESTAMPTZ | | Webhook送信成功日時 |
+
+#### インデックス
+
+```sql
+-- monitors
+CREATE UNIQUE INDEX idx_monitors_stream_url_active
+  ON monitors(stream_url)
+  WHERE status IN ('initializing', 'waiting', 'monitoring');
+
+-- monitor_events
+CREATE INDEX idx_monitor_events_monitor_id ON monitor_events(monitor_id);
+CREATE INDEX idx_monitor_events_created_at ON monitor_events(created_at);
+CREATE INDEX idx_monitor_events_webhook_status ON monitor_events(webhook_status)
+  WHERE webhook_status = 'pending';
+```
 
 ---
 
@@ -782,7 +1028,7 @@ API Gatewayが再起動した場合、データベース上の監視状態と実
 ```json
 {
   "event_type": "monitor.error",
-  "monitor_id": "mon_xxxxxxxxxxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "timestamp": "2024-01-15T20:15:30+09:00",
   "data": {
     "reason": "reconciliation_mismatch",
@@ -801,13 +1047,21 @@ API Gatewayが再起動した場合、データベース上の監視状態と実
 
 ## 11. ログ・メトリクス
 
-### 11.1 ログフォーマット
+### 11.1 ログ設定
+
+| 項目 | 値 | 説明 |
+| ---- | -- | ---- |
+| デフォルトレベル | `info` | 環境変数 `LOG_LEVEL` で変更可能 |
+| 利用可能レベル | debug, info, warn, error | 小文字で指定 |
+| 出力形式 | JSON | 構造化ログ |
+
+### 11.2 ログフォーマット
 
 ```json
 {
   "timestamp": "2024-01-15T20:15:30.123+09:00",
   "level": "INFO",
-  "monitor_id": "mon_xxxxxxxx",
+  "monitor_id": "mon-0190a5c8e4b07d8a9c1d2e3f4a5b6c7d",
   "component": "segment_analyzer",
   "message": "Blackout detected",
   "data": {
@@ -857,8 +1111,15 @@ signature = HMAC-SHA256(WEBHOOK_SIGNING_KEY, "{timestamp}.{request_body}")
 ```python
 import hmac
 import hashlib
+import time
 
 def verify_signature(payload: bytes, signature: str, timestamp: str, secret: str) -> bool:
+    # リプレイ攻撃対策: タイムスタンプが現在時刻から±5分以内かチェック
+    current_time = int(time.time())
+    request_time = int(timestamp)
+    if abs(current_time - request_time) > 300:  # 5分 = 300秒
+        return False
+
     expected = hmac.new(
         secret.encode(),
         f"{timestamp}.".encode() + payload,
@@ -866,6 +1127,15 @@ def verify_signature(payload: bytes, signature: str, timestamp: str, secret: str
     ).hexdigest()
     return hmac.compare_digest(f"sha256={expected}", signature)
 ```
+
+#### リプレイ攻撃対策
+
+| 項目 | 値 | 説明 |
+| ---- | -- | ---- |
+| タイムスタンプ許容範囲 | ±5分（300秒） | リクエスト時刻と現在時刻の差 |
+| 検証失敗時 | リクエスト拒否 | HTTP 401 Unauthorizedを返却 |
+
+※ 受信側はタイムスタンプが許容範囲外の場合、署名検証前にリクエストを拒否すべき
 
 ### 12.3 レート制限
 
@@ -935,9 +1205,97 @@ stream-monitor/
 | `DB_DSN`                     | PostgreSQL接続文字列                              | ○    |
 | `API_KEY`                    | API認証用キー                                     | ○    |
 | `WEBHOOK_SIGNING_KEY`        | Webhook署名用キー                                 | ○    |
+| `INTERNAL_API_KEY`           | Worker → Gateway内部通信用キー                    | ○    |
 | `LOG_LEVEL`                  | ログレベル（debug/info/warn/error）               | -    |
 | `MAX_MONITORS`               | 最大同時監視数（デフォルト: 50）                  | -    |
 | `HTTP_PROXY` / `HTTPS_PROXY` | `yt-dlp` 使用時のプロキシ設定（IPブロック回避用） | -    |
+| `GATEWAY_RECONCILE_TIMEOUT`  | 起動時再整合のタイムアウト（デフォルト: 30秒）    | -    |
+
+### 14.3 RBAC設定
+
+API GatewayがWorker Podを作成・管理するための権限設定。
+
+#### Role定義
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: stream-monitor-gateway
+  namespace: stream-monitor  # 権限はこのnamespaceに限定
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+```
+
+#### RoleBinding定義
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stream-monitor-gateway
+  namespace: stream-monitor
+subjects:
+  - kind: ServiceAccount
+    name: stream-monitor-gateway
+    namespace: stream-monitor
+roleRef:
+  kind: Role
+  name: stream-monitor-gateway
+  apiGroup: rbac.authorization.k8s.io
+```
+
+| 項目 | 値 |
+| ---- | -- |
+| 権限スコープ | namespace限定（ClusterRoleは使用しない） |
+| 対象namespace | `stream-monitor`（デプロイ先namespace） |
+| 必要権限 | Pods: create, delete, get, list, watch |
+
+### 14.4 HPA設定（API Gateway）
+
+API Gatewayは基本的にスケールアウト不要だが、将来の拡張に備えHPAを設定する。
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: stream-monitor-gateway
+  namespace: stream-monitor
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: stream-monitor-gateway
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+```
+
+| 項目 | 値 | 説明 |
+| ---- | -- | ---- |
+| 最小レプリカ数 | 1 | 通常運用時 |
+| 最大レプリカ数 | 3 | 負荷増大時 |
+| CPUスケール閾値 | 80% | 平均CPU使用率 |
+| メモリスケール閾値 | 80% | 平均メモリ使用率 |
+
+※ 想定される監視数（最大50件）では1レプリカで十分処理可能
 
 ---
 
@@ -1067,3 +1425,53 @@ stream-monitor/
 19. **ライブラリバージョン固定**
     - **決定**: 外部ツール・Goライブラリの推奨バージョンを明示的に指定。
     - **理由**: 再現可能なビルドと予期しない破壊的変更の回避。
+
+### 2026-01-07: 詳細設計レビューに基づく追加変更
+
+20. **解析サイクルの実行制御**
+    - **決定**: 解析処理が`check_interval_sec`を超過した場合は待機なしで次のサイクルを開始。解析完了まで次のマニフェスト取得は行わない（バックプレッシャー制御）。
+    - **理由**: 処理遅延時の挙動を明確化し、セグメントの取りこぼしを防ぐ。
+
+21. **Worker動作モード**
+    - **決定**: Waiting Mode（配信開始待機）とMonitoring Mode（セグメント解析）の2モードを定義。同一Pod内でモード遷移を行う。
+    - **理由**: 配信開始前からPodを起動し、シームレスに監視を開始するため。
+
+22. **マニフェスト取得失敗時の挙動**
+    - **決定**: 配信未開始/ネットワークエラー/動画削除・非公開を区別し、それぞれ適切な対応を行う。ネットワークエラーは指数バックオフでリトライ。
+    - **理由**: エラー種別に応じた適切なハンドリングを実現するため。
+
+23. **monitor_eventsテーブル追加**
+    - **決定**: Webhookイベントの履歴を保存するテーブルを追加。送信状態（pending/sent/failed）を管理。
+    - **理由**: デバッグ・監査のためのイベント履歴保持。
+
+24. **Worker → API Gateway状態同期**
+    - **決定**: Workerは内部API（`PUT /internal/v1/monitors/{monitor_id}/status`）経由でGatewayに状態を報告する。
+    - **理由**: 状態管理の一元化とPostgreSQLへの直接接続を避けるため。
+
+25. **セグメントエラーと配信終了の判定フロー**
+    - **決定**: 判定優先順位を明確化。EXT-X-ENDLIST > is_live=false > セグメント取得失敗（is_live=trueの場合のみエラー）。
+    - **理由**: 配信終了とエラーの誤判定を防ぐため。
+
+26. **Webhook署名のリプレイ攻撃対策**
+    - **決定**: タイムスタンプが現在時刻から±5分以内であることを検証。範囲外はリクエスト拒否。
+    - **理由**: セキュリティ強化のためのリプレイ攻撃対策。
+
+27. **monitor_id形式（DNS-1123準拠）**
+    - **決定**: `mon-` + UUIDv7（ハイフンのみで統一）。Pod名・環境変数・APIレスポンス・Webhookペイロードで全て同一形式を使用。
+    - **理由**: KubernetesのDNS-1123制約（ハイフンのみ許可）に準拠し、内外で統一することで、スキーマをシンプル化。UUIDv7のためタイムスタンプ順でソート可能。
+
+28. **ログレベルデフォルト**
+    - **決定**: デフォルトは`info`。環境変数`LOG_LEVEL`で変更可能。
+    - **理由**: 運用時の適切なログ量を確保。
+
+29. **RBAC設定**
+    - **決定**: Role/RoleBindingを使用し、権限をデプロイ先namespace（`stream-monitor`）に限定。ClusterRoleは使用しない。
+    - **理由**: 最小権限の原則に従い、セキュリティリスクを軽減。
+
+30. **HPA設定**
+    - **決定**: CPU/メモリ80%でスケール。最小1レプリカ、最大3レプリカ。想定監視数では1レプリカで十分。
+    - **理由**: 将来の拡張に備えつつ、通常運用でのリソース効率を確保。
+
+31. **シーケンス番号追跡**
+    - **決定**: シーケンス番号の追跡は行わない（最新セグメントのみを対象）。
+    - **理由**: リアルタイム監視において過去セグメントの網羅は不要。
