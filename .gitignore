@@ -1,0 +1,22 @@
+# Binaries (at root level only)
+/gateway
+/worker
+/webhook-demo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Test coverage
+coverage.out
+coverage.html

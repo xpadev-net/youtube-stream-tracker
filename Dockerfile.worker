@@ -1,0 +1,44 @@
+# Build stage
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+# Install dependencies
+RUN apk add --no-cache git
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source
+COPY . .
+
+# Build
+RUN CGO_ENABLED=0 GOOS=linux go build -o /worker ./cmd/worker
+
+# Runtime stage
+FROM alpine:3.19
+
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    ffmpeg \
+    python3 \
+    py3-pip
+
+# Install yt-dlp
+RUN pip3 install --break-system-packages yt-dlp
+
+# Install streamlink
+RUN pip3 install --break-system-packages streamlink
+
+WORKDIR /app
+
+COPY --from=builder /worker /app/worker
+
+# Create temp directory for segments
+RUN mkdir -p /tmp/segments
+
+EXPOSE 8081
+
+ENTRYPOINT ["/app/worker"]

@@ -1,0 +1,13 @@
+apiVersion: v2
+name: stream-monitor
+description: YouTube Stream Monitoring System - API Gateway and Worker components
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - youtube
+  - streaming
+  - monitoring
+  - webhook
+maintainers:
+  - name: xpadev

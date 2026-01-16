@@ -1,0 +1,99 @@
+# Default values for stream-monitor
+
+# Gateway configuration
+gateway:
+  replicaCount: 1
+  image:
+    repository: stream-monitor-gateway
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# Worker configuration
+worker:
+  image:
+    repository: stream-monitor-worker
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+# PostgreSQL configuration
+postgresql:
+  # Set to true to deploy PostgreSQL as part of this chart
+  enabled: false
+  # External PostgreSQL connection
+  host: ""
+  port: 5432
+  database: stream_monitor
+  username: stream_monitor
+  # Password should be provided via secret
+  existingSecret: ""
+  existingSecretKey: "password"
+
+# Secrets
+secrets:
+  # API key for external clients
+  apiKey: ""
+  # Internal API key for worker-gateway communication
+  internalApiKey: ""
+  # Webhook signing key
+  webhookSigningKey: ""
+
+# Existing secrets (alternative to inline secrets)
+existingSecrets:
+  # Name of existing secret containing API keys
+  apiKeys: ""
+  # Key names within the secret
+  apiKeyKey: "api-key"
+  internalApiKeyKey: "internal-api-key"
+  webhookSigningKeyKey: "webhook-signing-key"
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+
+# ServiceAccount configuration
+serviceAccount:
+  # Create service account
+  create: true
+  # Name of the service account (auto-generated if empty)
+  name: ""
+  # Annotations to add to the service account
+  annotations: {}
+
+# Monitoring configuration
+monitoring:
+  # Maximum number of concurrent monitors
+  maxMonitors: 50
+  # Reconciliation timeout in seconds
+  reconcileTimeout: 30
+
+# Proxy configuration (optional)
+proxy:
+  http: ""
+  https: ""
+
+# Node selector for gateway pods
+nodeSelector: {}
+
+# Tolerations for gateway pods
+tolerations: []
+
+# Affinity for gateway pods
+affinity: {}
