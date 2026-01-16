@@ -126,13 +126,13 @@ Worker はこの時点では「ダミーの状態報告」をするだけでよ�
 
 Gateway はリポジトリルートから次のコマンドで起動できるようにする。
 
-    (cd /Users/xpadev/IdeaProjects/youtube-stream-tracker && go run ./cmd/gateway)
+    go run ./cmd/gateway
 
 期待する観察結果は、標準出力にJSONログが出て、`GET /healthz` が 200 を返すことだ。
 
 Worker（ダミー実装の段階）は、リポジトリルートから次のコマンドで起動できるようにする。
 
-    (cd /Users/xpadev/IdeaProjects/youtube-stream-tracker && MONITOR_ID=mon-... STREAM_URL=... CALLBACK_URL=... go run ./cmd/worker)
+    MONITOR_ID=mon-... STREAM_URL=... CALLBACK_URL=... go run ./cmd/worker
 
 期待する観察結果は、起動ログが出て、内部APIへの状態送信（Milestone 4以降）が観察できることだ。
 
