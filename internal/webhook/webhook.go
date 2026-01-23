@@ -1,0 +1,196 @@
+package webhook
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
+)
+
+// EventType represents the type of webhook event.
+type EventType string
+
+const (
+	EventStreamStarted         EventType = "stream.started"
+	EventStreamEnded           EventType = "stream.ended"
+	EventStreamDelayed         EventType = "stream.delayed"
+	EventAlertBlackout         EventType = "alert.blackout"
+	EventAlertBlackoutRecovered EventType = "alert.blackout_recovered"
+	EventAlertSilence          EventType = "alert.silence"
+	EventAlertSilenceRecovered EventType = "alert.silence_recovered"
+	EventAlertSegmentError     EventType = "alert.segment_error"
+	EventMonitorError          EventType = "monitor.error"
+)
+
+// Payload represents a webhook payload.
+type Payload struct {
+	EventType EventType              `json:"event_type"`
+	MonitorID string                 `json:"monitor_id"`
+	StreamURL string                 `json:"stream_url"`
+	Timestamp time.Time              `json:"timestamp"`
+	Data      map[string]interface{} `json:"data,omitempty"`
+	Metadata  json.RawMessage        `json:"metadata,omitempty"`
+}
+
+// Sender handles webhook delivery.
+type Sender struct {
+	httpClient *http.Client
+	signingKey string
+	maxRetries int
+}
+
+// NewSender creates a new webhook sender.
+func NewSender(signingKey string) *Sender {
+	return &Sender{
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		signingKey: signingKey,
+		maxRetries: 3,
+	}
+}
+
+// SendResult contains the result of sending a webhook.
+type SendResult struct {
+	Success    bool
+	Attempts   int
+	StatusCode int
+	Error      string
+}
+
+// Send sends a webhook to the specified URL with retries.
+func (s *Sender) Send(ctx context.Context, webhookURL string, payload *Payload) *SendResult {
+	result := &SendResult{}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		result.Error = fmt.Sprintf("marshal payload: %v", err)
+		return result
+	}
+
+	// Retry with exponential backoff (1s, 2s, 4s)
+	delays := []time.Duration{0, 1 * time.Second, 2 * time.Second, 4 * time.Second}
+
+	for attempt := 1; attempt <= s.maxRetries; attempt++ {
+		result.Attempts = attempt
+
+		// Wait before retry (skip first attempt)
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				result.Error = "context canceled"
+				return result
+			case <-time.After(delays[attempt]):
+			}
+		}
+
+		statusCode, err := s.sendOnce(ctx, webhookURL, body)
+		result.StatusCode = statusCode
+
+		if err == nil && statusCode >= 200 && statusCode < 300 {
+			result.Success = true
+			log.Info("webhook sent successfully",
+				zap.String("url", webhookURL),
+				zap.String("event_type", string(payload.EventType)),
+				zap.Int("attempt", attempt),
+			)
+			return result
+		}
+
+		errMsg := ""
+		if err != nil {
+			errMsg = err.Error()
+		} else {
+			errMsg = fmt.Sprintf("HTTP %d", statusCode)
+		}
+
+		log.Warn("webhook delivery failed",
+			zap.String("url", webhookURL),
+			zap.String("event_type", string(payload.EventType)),
+			zap.Int("attempt", attempt),
+			zap.String("error", errMsg),
+		)
+
+		result.Error = errMsg
+	}
+
+	log.Error("webhook delivery failed after all retries",
+		zap.String("url", webhookURL),
+		zap.String("event_type", string(payload.EventType)),
+		zap.Int("total_attempts", result.Attempts),
+		zap.String("last_error", result.Error),
+	)
+
+	return result
+}
+
+// sendOnce sends a single webhook request.
+func (s *Sender) sendOnce(ctx context.Context, webhookURL string, body []byte) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("create request: %w", err)
+	}
+
+	// Set headers
+	timestamp := time.Now().Unix()
+	signature := s.sign(timestamp, body)
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", timestamp))
+	req.Header.Set("X-Signature-256", "sha256="+signature)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read and discard body to allow connection reuse
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	return resp.StatusCode, nil
+}
+
+// sign creates an HMAC-SHA256 signature for the webhook.
+// Format: HMAC-SHA256(key, "{timestamp}.{body}")
+func (s *Sender) sign(timestamp int64, body []byte) string {
+	message := fmt.Sprintf("%d.%s", timestamp, string(body))
+	mac := hmac.New(sha256.New, []byte(s.signingKey))
+	mac.Write([]byte(message))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifySignature verifies a webhook signature.
+// This is useful for implementing a webhook receiver.
+func VerifySignature(signingKey, signature string, timestamp int64, body []byte) bool {
+	// Check timestamp is within 5 minutes
+	now := time.Now().Unix()
+	if abs(now-timestamp) > 300 {
+		return false
+	}
+
+	// Verify signature
+	message := fmt.Sprintf("%d.%s", timestamp, string(body))
+	mac := hmac.New(sha256.New, []byte(signingKey))
+	mac.Write([]byte(message))
+	expected := hex.EncodeToString(mac.Sum(nil))
+
+	return hmac.Equal([]byte(signature), []byte(expected))
+}
+
+func abs(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}

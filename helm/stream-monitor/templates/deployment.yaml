@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "stream-monitor.fullname" . }}-gateway
+  labels:
+    {{- include "stream-monitor.gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "stream-monitor.gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stream-monitor.gateway.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "stream-monitor.serviceAccountName" . }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          envFrom:
+            - configMapRef:
+                name: {{ include "stream-monitor.fullname" . }}-config
+          env:
+            - name: PORT
+              value: "8080"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: RECONCILE_ON_BOOT
+              value: "true"
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgresql.existingSecret | default (printf "%s-postgresql" (include "stream-monitor.fullname" .)) }}
+                  key: {{ .Values.postgresql.existingSecretKey | default "password" }}
+            - name: DATABASE_URL
+              value: {{ include "stream-monitor.databaseURL" . | quote }}
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecrets.apiKeys | default (printf "%s-secrets" (include "stream-monitor.fullname" .)) }}
+                  key: {{ .Values.existingSecrets.apiKeyKey | default "api-key" }}
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecrets.apiKeys | default (printf "%s-secrets" (include "stream-monitor.fullname" .)) }}
+                  key: {{ .Values.existingSecrets.internalApiKeyKey | default "internal-api-key" }}
+            - name: WEBHOOK_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecrets.apiKeys | default (printf "%s-secrets" (include "stream-monitor.fullname" .)) }}
+                  key: {{ .Values.existingSecrets.webhookSigningKeyKey | default "webhook-signing-key" }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

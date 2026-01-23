@@ -1,0 +1,36 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "stream-monitor.fullname" . }}
+  labels:
+    {{- include "stream-monitor.labels" . | nindent 4 }}
+rules:
+  # Pod management for worker pods
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  # Service discovery for gateway internal base URL
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  # Pod logs for debugging
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "stream-monitor.fullname" . }}
+  labels:
+    {{- include "stream-monitor.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "stream-monitor.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "stream-monitor.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

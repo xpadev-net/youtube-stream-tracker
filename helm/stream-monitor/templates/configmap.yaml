@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stream-monitor.fullname" . }}-config
+  labels:
+    {{- include "stream-monitor.labels" . | nindent 4 }}
+data:
+  MAX_MONITORS: {{ .Values.monitoring.maxMonitors | quote }}
+  RECONCILE_TIMEOUT: {{ .Values.monitoring.reconcileTimeout | quote }}
+  WORKER_IMAGE: {{ .Values.worker.image.repository | quote }}
+  WORKER_IMAGE_TAG: {{ .Values.worker.image.tag | quote }}
+  NAMESPACE: {{ .Release.Namespace | quote }}
+  IN_CLUSTER: "true"
+  {{- if .Values.proxy.http }}
+  HTTP_PROXY: {{ .Values.proxy.http | quote }}
+  {{- end }}
+  {{- if .Values.proxy.https }}
+  HTTPS_PROXY: {{ .Values.proxy.https | quote }}
+  {{- end }}
