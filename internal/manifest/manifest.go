@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/grafov/m3u8"
+
+	"github.com/xpadev-net/youtube-stream-tracker/internal/validation"
 )
 
 // Segment represents a media segment from the manifest.
@@ -29,9 +31,7 @@ type Parser struct {
 // NewParser creates a new manifest parser.
 func NewParser(timeout time.Duration) *Parser {
 	return &Parser{
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		httpClient:      validation.NewSafeHTTPClient(timeout),
 		maxSegmentBytes: 10 * 1024 * 1024,
 	}
 }
@@ -42,9 +42,7 @@ func NewParserWithLimit(timeout time.Duration, maxSegmentBytes int64) *Parser {
 		maxSegmentBytes = 10 * 1024 * 1024
 	}
 	return &Parser{
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		httpClient:      validation.NewSafeHTTPClient(timeout),
 		maxSegmentBytes: maxSegmentBytes,
 	}
 }
@@ -145,7 +143,17 @@ func (p *Parser) extractLatestFromMediaPlaylist(mediapl *m3u8.MediaPlaylist, bas
 }
 
 // IsEndList returns true if the playlist is marked as ended (EXT-X-ENDLIST).
+const maxIsEndListDepth = 4
+
 func (p *Parser) IsEndList(ctx context.Context, manifestURL string) (bool, error) {
+	return p.isEndListWithDepth(ctx, manifestURL, 0)
+}
+
+func (p *Parser) isEndListWithDepth(ctx context.Context, manifestURL string, depth int) (bool, error) {
+	if depth > maxIsEndListDepth {
+		return false, fmt.Errorf("max master->media recursion depth exceeded")
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", manifestURL, nil)
 	if err != nil {
 		return false, fmt.Errorf("create request: %w", err)
@@ -175,7 +183,6 @@ func (p *Parser) IsEndList(ctx context.Context, manifestURL string) (bool, error
 		if len(masterpl.Variants) == 0 {
 			return false, fmt.Errorf("master playlist has no variants")
 		}
-		// Pick first variant (keep selection logic simple / consistent with getLatestHLSSegment)
 		baseURL, err := url.Parse(manifestURL)
 		if err != nil {
 			return false, fmt.Errorf("parse manifest URL: %w", err)
@@ -185,8 +192,7 @@ func (p *Parser) IsEndList(ctx context.Context, manifestURL string) (bool, error
 		if err != nil {
 			return false, fmt.Errorf("resolve variant URL: %w", err)
 		}
-		// recursively call IsEndList for the resolved media playlist
-		return p.IsEndList(ctx, mediaURL)
+		return p.isEndListWithDepth(ctx, mediaURL, depth+1)
 	default:
 		return false, fmt.Errorf("unknown playlist type")
 	}
