@@ -24,9 +24,8 @@ func NewCallbackClient(baseURL, internalAPIKey string) *CallbackClient {
 	return &CallbackClient{
 		baseURL:        baseURL,
 		internalAPIKey: internalAPIKey,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		// Use safe HTTP client to enforce IP checks at dial time for internal callbacks
+		httpClient: validation.NewSafeHTTPClient(10 * time.Second),
 	}
 }
 
