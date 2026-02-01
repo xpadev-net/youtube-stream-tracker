@@ -29,11 +29,12 @@ type Reconciler struct {
 	k8sClient     *Client
 	repo          *db.MonitorRepository
 	webhookSender *webhook.Sender
+	reconciliationWebhookURL string
 	timeout       time.Duration
 }
 
 // NewReconciler creates a new reconciler.
-func NewReconciler(k8sClient *Client, repo *db.MonitorRepository, webhookSender *webhook.Sender, timeout time.Duration) *Reconciler {
+func NewReconciler(k8sClient *Client, repo *db.MonitorRepository, webhookSender *webhook.Sender, reconciliationWebhookURL string, timeout time.Duration) *Reconciler {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
@@ -41,6 +42,7 @@ func NewReconciler(k8sClient *Client, repo *db.MonitorRepository, webhookSender 
 		k8sClient:     k8sClient,
 		repo:          repo,
 		webhookSender: webhookSender,
+		reconciliationWebhookURL: reconciliationWebhookURL,
 		timeout:       timeout,
 	}
 }
@@ -181,7 +183,7 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 
 // sendErrorWebhook sends a monitor.error webhook.
 func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, reason, message string) {
-	if r.webhookSender == nil {
+	if r.webhookSender == nil || r.reconciliationWebhookURL == "" {
 		return
 	}
 
@@ -208,7 +210,7 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		result := r.webhookSender.Send(sendCtx, monitor.CallbackURL, payload)
+		result := r.webhookSender.Send(sendCtx, r.reconciliationWebhookURL, payload)
 		if !result.Success {
 			log.Warn("failed to send error webhook during reconciliation",
 				zap.String("monitor_id", monitor.ID),

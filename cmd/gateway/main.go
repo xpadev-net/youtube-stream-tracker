@@ -71,7 +71,7 @@ func main() {
 		log.Fatal("failed to create k8s client", zap.Error(err))
 	}
 	webhookSender := webhook.NewSender(cfg.WebhookSigningKey)
-	reconciler := k8s.NewReconciler(k8sClient, repo, webhookSender, cfg.ReconcileTimeout)
+	reconciler := k8s.NewReconciler(k8sClient, repo, webhookSender, cfg.ReconcileWebhookURL, cfg.ReconcileTimeout)
 
 	// Create API handler
 	handler := api.NewHandler(

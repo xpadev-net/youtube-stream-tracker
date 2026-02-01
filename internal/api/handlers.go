@@ -403,6 +403,7 @@ func (h *Handler) ListMonitors(c *gin.Context) {
 // UpdateStatusRequest represents the request body for updating monitor status (internal API).
 type UpdateStatusRequest struct {
 	Status string `json:"status" binding:"required"`
+	StreamStatus string `json:"stream_status,omitempty"`
 	Health *struct {
 		Video string `json:"video"`
 		Audio string `json:"audio"`
@@ -455,13 +456,17 @@ func (h *Handler) UpdateMonitorStatus(c *gin.Context) {
 	}
 
 	// Update stats if provided
-	if req.Health != nil || req.Statistics != nil {
+	if req.Health != nil || req.Statistics != nil || req.StreamStatus != "" {
 		stats, err := h.repo.GetStats(c.Request.Context(), monitorID)
 		if err != nil {
 			log.Error("failed to get monitor stats", zap.Error(err))
 		} else if stats != nil {
 			now := time.Now()
 			stats.LastCheckAt = &now
+
+			if req.StreamStatus != "" {
+				stats.StreamStatus = db.StreamStatus(req.StreamStatus)
+			}
 
 			if req.Health != nil {
 				if req.Health.Video != "" {

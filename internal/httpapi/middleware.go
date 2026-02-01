@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -75,6 +76,14 @@ type rateLimiter struct {
 	lastSeen map[string]time.Time
 }
 
+type limiterRegistry struct {
+	mu       sync.Mutex
+	limiters map[string]*rateLimiter
+	once     sync.Once
+}
+
+var sharedLimiters = &limiterRegistry{limiters: make(map[string]*rateLimiter)}
+
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 	interval := window / time.Duration(limit)
 	if interval <= 0 {
@@ -89,19 +98,16 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 	}
 }
 
-func (l *rateLimiter) cleanup() {
-	ticker := time.NewTicker(l.window)
-	defer ticker.Stop()
-	for range ticker.C {
-		l.mu.Lock()
-		cutoff := time.Now().Add(-l.window)
-		for key, seen := range l.lastSeen {
-			if seen.Before(cutoff) {
-				delete(l.lastSeen, key)
-				delete(l.visitors, key)
-			}
+func (l *rateLimiter) cleanup(now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	cutoff := now.Add(-l.window)
+	for key, seen := range l.lastSeen {
+		if seen.Before(cutoff) {
+			delete(l.lastSeen, key)
+			delete(l.visitors, key)
 		}
-		l.mu.Unlock()
 	}
 }
 
@@ -118,10 +124,38 @@ func (l *rateLimiter) getLimiter(key string) *rate.Limiter {
 	return limiter
 }
 
-// RateLimit returns a middleware that enforces a fixed-window rate limit by key.
+func (r *limiterRegistry) get(limit int, window time.Duration) *rateLimiter {
+	key := fmt.Sprintf("%d/%s", limit, window)
+
+	r.mu.Lock()
+	limiter, exists := r.limiters[key]
+	if !exists {
+		limiter = newRateLimiter(limit, window)
+		r.limiters[key] = limiter
+		r.once.Do(func() {
+			go r.cleanupLoop()
+		})
+	}
+	r.mu.Unlock()
+
+	return limiter
+}
+
+func (r *limiterRegistry) cleanupLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for now := range ticker.C {
+		r.mu.Lock()
+		for _, limiter := range r.limiters {
+			limiter.cleanup(now)
+		}
+		r.mu.Unlock()
+	}
+}
+
+// RateLimit returns a middleware that enforces a token-bucket rate limit by key.
 func RateLimit(limit int, window time.Duration) gin.HandlerFunc {
-	limiter := newRateLimiter(limit, window)
-	go limiter.cleanup()
+	limiter := sharedLimiters.get(limit, window)
 	return func(c *gin.Context) {
 		key := c.GetHeader(HeaderAPIKey)
 		if key == "" {

@@ -8,6 +8,7 @@ data:
   MAX_MONITORS: {{ .Values.monitoring.maxMonitors | quote }}
   GATEWAY_RECONCILE_TIMEOUT: {{ .Values.monitoring.reconcileTimeout | quote }}
   RECONCILE_TIMEOUT: {{ .Values.monitoring.reconcileTimeout | quote }}
+  RECONCILIATION_WEBHOOK_URL: {{ .Values.monitoring.reconciliationWebhookUrl | quote }}
   WORKER_IMAGE: {{ .Values.worker.image.repository | quote }}
   WORKER_IMAGE_TAG: {{ .Values.worker.image.tag | quote }}
   NAMESPACE: {{ .Release.Namespace | quote }}

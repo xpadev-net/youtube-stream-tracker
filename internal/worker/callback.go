@@ -57,6 +57,7 @@ type StatusRequest struct {
 
 // ReportStatus reports the current status to the gateway.
 func (c *CallbackClient) ReportStatus(ctx context.Context, monitorID string, status db.MonitorStatus, update *StatusUpdate) error {
+	// Internal callbacks are expected to target the in-cluster gateway service.
 	if err := validation.ValidateOutboundURL(ctx, c.baseURL, true); err != nil {
 		return fmt.Errorf("invalid internal callback url: %w", err)
 	}
