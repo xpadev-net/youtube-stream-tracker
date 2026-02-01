@@ -83,7 +83,7 @@ Acceptance is met when a user can see green GitHub Actions runs for the test wor
 
 ## Idempotence and Recovery
 
-Re-running the workflows is safe because the steps are read-only checks (tests) and image pushes with deterministic tags. If a build fails halfway, re-run the workflow after fixing the cause; no manual cleanup is required because image tags are immutable and new tags do not overwrite existing ones.
+Re-running the workflows is safe because the steps are read-only checks (tests) and image pushes with deterministic tags. If a build fails halfway, re-run the workflow after fixing the cause; no manual cleanup is required. SHA-based tags are immutable, while the `latest` tag is intentionally updated on each push to the default branch.
 
 ## Artifacts and Notes
 
