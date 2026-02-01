@@ -121,9 +121,10 @@ func TestUpdateMonitorStatusValidation(t *testing.T) {
 	router.PUT("/internal/v1/monitors/:monitor_id/status", handler.UpdateMonitorStatus)
 
 	// Prepare a request with invalid stream_status
+	validID := ids.NewMonitorID()
 	body := `{"status":"monitoring","stream_status":"invalid_status"}`
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("PUT", "/internal/v1/monitors/mon-123/status", strings.NewReader(body))
+	req := httptest.NewRequest("PUT", "/internal/v1/monitors/"+validID+"/status", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(w, req)
 
@@ -134,7 +135,7 @@ func TestUpdateMonitorStatusValidation(t *testing.T) {
 	// Prepare a request with invalid health.video
 	body = `{"status":"monitoring","health":{"video":"bad","audio":"ok"}}`
 	w = httptest.NewRecorder()
-	req = httptest.NewRequest("PUT", "/internal/v1/monitors/mon-123/status", strings.NewReader(body))
+	req = httptest.NewRequest("PUT", "/internal/v1/monitors/"+validID+"/status", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(w, req)
 
