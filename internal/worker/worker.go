@@ -198,6 +198,9 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 				w.sendWebhook(ctx, webhook.EventStreamStarted, map[string]interface{}{
 					"title": info.Title,
 				})
+				if w.getState() == StateError {
+					return fmt.Errorf("webhook delivery failed")
+				}
 
 				// Transition to monitoring
 				w.setState(StateMonitoring)
@@ -241,6 +244,9 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 					w.sendWebhook(ctx, webhook.EventStreamEnded, map[string]interface{}{
 						"reason": info.LiveStatus,
 					})
+					if w.getState() == StateError {
+						return fmt.Errorf("webhook delivery failed")
+					}
 					w.setState(StateCompleted)
 					w.reportStatus(ctx, db.StatusCompleted, nil)
 					return nil
@@ -269,7 +275,9 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 		return fmt.Errorf("get manifest URL: %w", err)
 	}
 	if w.isDASHManifestURL(manifestURL) {
-		w.handleDASHManifest(ctx, manifestURL)
+		if err := w.handleDASHManifest(ctx, manifestURL); err != nil {
+			return err
+		}
 		w.reportStatus(ctx, db.StatusCompleted, nil)
 		return nil
 	}
@@ -303,7 +311,9 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 					log.Warn("failed to refresh manifest URL", zap.Error(err))
 				} else {
 					if w.isDASHManifestURL(newURL) {
-						w.handleDASHManifest(ctx, newURL)
+						if err := w.handleDASHManifest(ctx, newURL); err != nil {
+							return err
+						}
 						w.reportStatus(ctx, db.StatusCompleted, nil)
 						return nil
 					}
@@ -319,6 +329,9 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 		if err := w.analyzeLatestSegment(ctx); err != nil {
 			log.Warn("segment analysis failed", zap.Error(err))
 			if w.handleSegmentError(ctx, err) {
+				if w.getState() == StateError {
+					return fmt.Errorf("webhook delivery failed")
+				}
 				w.reportStatus(ctx, db.StatusCompleted, nil)
 				return nil
 			}
@@ -354,6 +367,9 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 		w.sendWebhook(ctx, webhook.EventStreamEnded, map[string]interface{}{
 			"reason": "endlist_detected",
 		})
+		if w.getState() == StateError {
+			return fmt.Errorf("webhook delivery failed")
+		}
 		w.setState(StateCompleted)
 		return nil
 	}
@@ -552,6 +568,9 @@ func (w *Worker) handleSegmentError(ctx context.Context, err error) bool {
 			w.sendWebhook(ctx, webhook.EventStreamEnded, map[string]interface{}{
 				"reason": "segment_error_threshold",
 			})
+			if w.getState() == StateError {
+				return true
+			}
 			w.setState(StateCompleted)
 			return true
 		}
@@ -636,6 +655,9 @@ func (w *Worker) checkLiveStatus(ctx context.Context) error {
 		w.sendWebhook(ctx, webhook.EventStreamEnded, map[string]interface{}{
 			"reason": "stream_no_longer_live",
 		})
+		if w.getState() == StateError {
+			return fmt.Errorf("webhook delivery failed")
+		}
 		w.setState(StateCompleted)
 	}
 	return nil
@@ -645,7 +667,7 @@ func (w *Worker) isDASHManifestURL(manifestURL string) bool {
 	return strings.Contains(strings.ToLower(manifestURL), ".mpd")
 }
 
-func (w *Worker) handleDASHManifest(ctx context.Context, manifestURL string) {
+func (w *Worker) handleDASHManifest(ctx context.Context, manifestURL string) error {
 	w.mu.Lock()
 	w.streamStatus = db.StreamStatusEnded
 	w.mu.Unlock()
@@ -653,7 +675,11 @@ func (w *Worker) handleDASHManifest(ctx context.Context, manifestURL string) {
 		"reason":       "dash_not_supported",
 		"manifest_url": manifestURL,
 	})
+	if w.getState() == StateError {
+		return fmt.Errorf("webhook delivery failed")
+	}
 	w.setState(StateCompleted)
+	return nil
 }
 
 // reportStatus reports the current status to the gateway.

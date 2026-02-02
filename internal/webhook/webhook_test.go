@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -191,8 +192,15 @@ func TestSender_Send_RetryTimestamp(t *testing.T) {
 	// Verify timestamp in body is consistent
 	// We can decode to map to check specifically the timestamp field, or just string compare (which we did).
 
-	// Verify X-Timestamp changes (as it reflects transmission time)
-	if timestamps[0] == timestamps[1] {
-		t.Errorf("X-Timestamp header should change between retries, got same: %s", timestamps[0])
+	first, err := strconv.ParseInt(timestamps[0], 10, 64)
+	if err != nil {
+		t.Fatalf("failed to parse first X-Timestamp: %v", err)
+	}
+	second, err := strconv.ParseInt(timestamps[1], 10, 64)
+	if err != nil {
+		t.Fatalf("failed to parse second X-Timestamp: %v", err)
+	}
+	if second < first {
+		t.Errorf("X-Timestamp should be monotonic: first=%d second=%d", first, second)
 	}
 }
