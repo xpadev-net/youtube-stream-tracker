@@ -212,16 +212,21 @@ func (db *DB) hasBaselineSchema(ctx context.Context, conn *pgxpool.Conn) (bool, 
 		return false, nil
 	}
 
-	var indexExists bool
+	var indexCount int
 	if err := conn.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM pg_indexes
-			WHERE schemaname = 'public' AND indexname = 'idx_monitors_stream_url_active'
-		)
-	`).Scan(&indexExists); err != nil {
+		SELECT COUNT(*)
+		FROM pg_indexes
+		WHERE schemaname = 'public'
+		  AND indexname IN (
+			'idx_monitors_stream_url_active',
+			'idx_monitor_events_monitor_id',
+			'idx_monitor_events_created_at',
+			'idx_monitor_events_webhook_status'
+		  )
+	`).Scan(&indexCount); err != nil {
 		return false, err
 	}
-	if !indexExists {
+	if indexCount != 4 {
 		return false, nil
 	}
 
