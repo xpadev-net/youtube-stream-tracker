@@ -200,6 +200,7 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 					"title": info.Title,
 				})
 				if w.getState() == StateError {
+					w.reportStatus(ctx, db.StatusError, nil)
 					return fmt.Errorf("webhook delivery failed")
 				}
 
@@ -246,6 +247,7 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 						"reason": info.LiveStatus,
 					})
 					if w.getState() == StateError {
+						w.reportStatus(ctx, db.StatusError, nil)
 						return fmt.Errorf("webhook delivery failed")
 					}
 					w.setState(StateCompleted)

@@ -54,6 +54,7 @@ type Sender struct {
 func NewSender(signingKey string) *Sender {
 	client := validation.NewSafeHTTPClient(10 * time.Second)
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// Cap redirects more strictly than the Go default (10) for defense in depth.
 		if len(via) >= 5 {
 			return fmt.Errorf("too many redirects")
 		}
@@ -65,7 +66,7 @@ func NewSender(signingKey string) *Sender {
 	return &Sender{
 		httpClient: client,
 		signingKey: signingKey,
-		maxRetries: 4,
+		maxRetries: 4, // total attempts (initial + 3 retries)
 	}
 }
 

@@ -290,6 +290,7 @@ func splitSQLStatements(sql string) []string {
 		if inLineComment {
 			if ch == '\n' {
 				inLineComment = false
+				builder.WriteByte(ch)
 			}
 			continue
 		}
