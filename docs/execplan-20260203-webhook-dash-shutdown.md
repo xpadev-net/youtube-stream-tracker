@@ -54,7 +54,7 @@ This repository includes `.agent/PLANS.md`, and this document must be maintained
 
 ### Milestone 1: Webhook失敗時の監視削除フローを確立する
 
-この段階では、Webhookが全リトライ失敗した時にWorkerがGatewayに「監視削除」を依頼し、GatewayがDB削除とPod削除を行うまでの一本道を作ります。まず `internal/api/handlers.go` に内部API `POST /internal/v1/monitors/:monitor_id/terminate` を追加します。リクエストボディには `reason`（例: `webhook_delivery_failed`）を含め、Validationはmonitor_idの形式のみで構いません。処理は以下の順序にします。
+この段階では、Webhookが全リトライ失敗した時にWorkerがGatewayに「監視削除」を依頼し、GatewayがDB削除とPod削除を行うまでの一本道を作ります。まず `internal/api/handlers.go` に内部API `POST /internal/v1/monitors/{monitor_id}/terminate` を追加します。リクエストボディには `reason`（例: `webhook_delivery_failed`）を含め、Validationはmonitor_idの形式のみで構いません。処理は以下の順序にします。
 
 1) `monitor_id` が存在しない場合はHTTP 404ではなくHTTP 200で終了し、内部呼び出しの冪等性を保つ。
 2) `repo.Delete(ctx, monitor_id)` を実行し、DBから監視ジョブを削除する。削除に失敗した場合は500を返す。
@@ -159,7 +159,7 @@ Graceful Shutdownは、解析に時間がかかるモックAnalyzerを使い、s
 
 `internal/api/handlers.go` に以下の新しいハンドラを定義します。
 
-- ルート: `POST /internal/v1/monitors/:monitor_id/terminate`
+- ルート: `POST /internal/v1/monitors/{monitor_id}/terminate`
 - 認証: `X-Internal-API-Key` 必須（既存のInternalAPIKeyAuthを使用）
 - リクエストボディ: `{"reason":"webhook_delivery_failed"}`
 - 振る舞い: DBレコード削除（`repo.Delete`）、Pod削除（`reconciler.DeleteMonitorPod`）、成功時はHTTP 200。
