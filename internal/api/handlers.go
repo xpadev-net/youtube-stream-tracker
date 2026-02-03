@@ -559,6 +559,10 @@ func (h *Handler) TerminateMonitor(c *gin.Context) {
 
 	if err := h.repo.Delete(c.Request.Context(), monitorID); err != nil {
 		if errors.Is(err, db.ErrMonitorNotFound) {
+			log.Info("monitor already deleted",
+				zap.String("monitor_id", monitorID),
+				zap.String("reason", req.Reason),
+			)
 			httpapi.RespondOK(c, gin.H{
 				"monitor_id": monitorID,
 				"deleted":    false,

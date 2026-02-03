@@ -171,8 +171,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	for {
 		if w.isShutdownRequested() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			return w.gracefulShutdown(shutdownCtx)
+			err := w.gracefulShutdown(shutdownCtx)
+			cancel()
+			return err
 		}
 
 		switch w.getState() {
@@ -197,8 +198,9 @@ func (w *Worker) Run(ctx context.Context) error {
 
 		if w.isShutdownRequested() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			return w.gracefulShutdown(shutdownCtx)
+			err := w.gracefulShutdown(shutdownCtx)
+			cancel()
+			return err
 		}
 	}
 }
@@ -777,11 +779,6 @@ func (w *Worker) gracefulShutdown(ctx context.Context) error {
 	log.Info("performing graceful shutdown")
 
 	w.reportStatus(ctx, db.StatusStopped, nil)
-
-	// Clean up temp files
-	if err := w.analyzer.CleanupMonitor(w.cfg.MonitorID); err != nil {
-		log.Warn("failed to cleanup monitor temp files", zap.Error(err))
-	}
 
 	log.Info("graceful shutdown complete")
 	return nil

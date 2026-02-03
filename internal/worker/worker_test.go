@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -209,8 +210,9 @@ func (s *stubAnalyzer) AnalyzeSegment(ctx context.Context, segmentPath string) (
 }
 
 type delayedAnalyzer struct {
-	delay time.Duration
-	done  chan struct{}
+	delay    time.Duration
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 func (d *delayedAnalyzer) EnsureTmpDir() error {
@@ -231,9 +233,11 @@ func (d *delayedAnalyzer) CleanupSegment(segmentPath string) error {
 
 func (d *delayedAnalyzer) AnalyzeSegment(ctx context.Context, segmentPath string) (*ffmpeg.AnalysisResult, error) {
 	time.Sleep(d.delay)
-	if d.done != nil {
-		close(d.done)
-	}
+	d.doneOnce.Do(func() {
+		if d.done != nil {
+			close(d.done)
+		}
+	})
 	return &ffmpeg.AnalysisResult{
 		Black:   &ffmpeg.BlackDetectResult{},
 		Silence: &ffmpeg.SilenceDetectResult{},

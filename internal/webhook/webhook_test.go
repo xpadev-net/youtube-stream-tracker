@@ -134,7 +134,6 @@ func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestSender_Send_RetryTimestamp(t *testing.T) {
 	sender := NewSender("test-secret")
-	sender.httpClient = &http.Client{Transport: &mockTransport{}}
 
 	var requestBodies [][]byte
 	var timestamps []string // X-Timestamp header
@@ -162,7 +161,7 @@ func TestSender_Send_RetryTimestamp(t *testing.T) {
 			}, nil
 		},
 	}
-	sender.httpClient.Transport = mock
+	sender.httpClient = &http.Client{Transport: mock}
 	sender.maxRetries = 2 // 2 attempts total (1 initial + 1 retry)
 
 	payload := &Payload{
