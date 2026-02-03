@@ -550,7 +550,7 @@ func parseMPDDuration(mpd *dashMPD) (float64, error) {
 		total += seconds
 	}
 	if total <= 0 {
-		return 0, fmt.Errorf("mediaPresentationDuration must be greater than 0")
+		return 0, fmt.Errorf("parsed duration is zero or negative")
 	}
 	return total, nil
 }
