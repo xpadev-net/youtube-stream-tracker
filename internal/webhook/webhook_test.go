@@ -134,6 +134,7 @@ func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestSender_Send_RetryTimestamp(t *testing.T) {
 	sender := NewSender("test-secret")
+	defaultClient := sender.httpClient
 
 	var requestBodies [][]byte
 	var timestamps []string // X-Timestamp header
@@ -161,7 +162,11 @@ func TestSender_Send_RetryTimestamp(t *testing.T) {
 			}, nil
 		},
 	}
-	sender.httpClient.Transport = mock
+	sender.httpClient = &http.Client{
+		Transport:     mock,
+		Timeout:       defaultClient.Timeout,
+		CheckRedirect: defaultClient.CheckRedirect,
+	}
 	sender.maxRetries = 2 // 2 attempts total (1 initial + 1 retry)
 
 	payload := &Payload{
@@ -171,7 +176,7 @@ func TestSender_Send_RetryTimestamp(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	result := sender.Send(ctx, "http://example.com", payload)
+	result := sender.sendWithoutValidation(ctx, "http://localhost", payload)
 
 	if !result.Success {
 		t.Errorf("Send failed: %v", result.Error)

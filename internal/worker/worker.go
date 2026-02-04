@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +33,28 @@ type WebhookSender interface {
 	Send(ctx context.Context, url string, payload *webhook.Payload) *webhook.SendResult
 }
 
+// ManifestParser provides manifest parsing operations.
+type ManifestParser interface {
+	GetLatestSegment(ctx context.Context, manifestURL string) (*manifest.Segment, error)
+	IsEndList(ctx context.Context, manifestURL string) (bool, error)
+	FetchSegment(ctx context.Context, segmentURL string) ([]byte, error)
+}
+
+// SegmentAnalyzer provides segment analysis operations.
+type SegmentAnalyzer interface {
+	EnsureTmpDir() error
+	CleanupMonitor(monitorID string) error
+	SaveSegment(monitorID string, data []byte) (string, error)
+	CleanupSegment(segmentPath string) error
+	AnalyzeSegment(ctx context.Context, segmentPath string) (*ffmpeg.AnalysisResult, error)
+}
+
+// CallbackReporter provides gateway internal API operations.
+type CallbackReporter interface {
+	ReportStatus(ctx context.Context, monitorID string, status db.MonitorStatus, update *StatusUpdate) error
+	TerminateMonitor(ctx context.Context, monitorID string, reason string) error
+}
+
 // YtDlpClient provides stream status and manifest lookup.
 type YtDlpClient interface {
 	IsStreamLive(ctx context.Context, streamURL string) (bool, *ytdlp.StreamInfo, error)
@@ -45,10 +65,10 @@ type YtDlpClient interface {
 type Worker struct {
 	cfg            *config.WorkerConfig
 	ytdlpClient    YtDlpClient
-	manifestParser *manifest.Parser
-	analyzer       *ffmpeg.Analyzer
+	manifestParser ManifestParser
+	analyzer       SegmentAnalyzer
 	webhookSender  WebhookSender
-	callbackClient *CallbackClient
+	callbackClient CallbackReporter
 
 	// State
 	mu                  sync.Mutex
@@ -72,6 +92,11 @@ type Worker struct {
 	consecutiveBlack   float64
 	consecutiveSilence float64
 
+	// Shutdown state
+	shutdownRequested bool
+	shutdownCh        chan struct{}
+	cancelWork        context.CancelFunc
+
 	// Metadata for webhooks
 	metadata json.RawMessage
 }
@@ -85,10 +110,10 @@ func NewWorker(cfg *config.WorkerConfig) *Worker {
 func NewWorkerWithDeps(
 	cfg *config.WorkerConfig,
 	ytdlpClient YtDlpClient,
-	manifestParser *manifest.Parser,
-	analyzer *ffmpeg.Analyzer,
+	manifestParser ManifestParser,
+	analyzer SegmentAnalyzer,
 	webhookSender WebhookSender,
-	callbackClient *CallbackClient,
+	callbackClient CallbackReporter,
 ) *Worker {
 	if ytdlpClient == nil {
 		ytdlpClient = ytdlp.NewClient(cfg.YtDlpPath, cfg.StreamlinkPath, cfg.HTTPProxy, cfg.HTTPSProxy)
@@ -114,6 +139,7 @@ func NewWorkerWithDeps(
 		callbackClient: callbackClient,
 		state:          StateWaiting,
 		streamStatus:   db.StreamStatusUnknown,
+		shutdownCh:     make(chan struct{}),
 	}
 }
 
@@ -128,30 +154,44 @@ func (w *Worker) Run(ctx context.Context) error {
 	if err := w.analyzer.EnsureTmpDir(); err != nil {
 		return fmt.Errorf("ensure tmp dir: %w", err)
 	}
-	defer w.analyzer.CleanupMonitor(w.cfg.MonitorID)
+	defer func() {
+		if err := w.analyzer.CleanupMonitor(w.cfg.MonitorID); err != nil {
+			log.Warn("failed to cleanup monitor temp files", zap.Error(err))
+		}
+	}()
+
+	workCtx, cancelWork := context.WithCancel(ctx)
+	w.mu.Lock()
+	w.cancelWork = cancelWork
+	w.mu.Unlock()
+	defer cancelWork()
+	go func() {
+		<-ctx.Done()
+		if w.requestShutdown() {
+			log.Info("shutdown requested")
+		}
+	}()
 
 	// Main loop
 	for {
-		select {
-		case <-ctx.Done():
-			log.Info("worker stopping due to context cancellation")
+		if w.isShutdownRequested() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			return w.gracefulShutdown(shutdownCtx)
-		default:
+			err := w.gracefulShutdown(shutdownCtx)
+			cancel()
+			return err
 		}
 
 		switch w.getState() {
 		case StateWaiting:
-			if err := w.waitingMode(ctx); err != nil {
+			if err := w.waitingMode(workCtx); err != nil {
 				log.Error("waiting mode error", zap.Error(err))
-				w.transitionToError(ctx, err.Error())
+				w.transitionToError(workCtx, err.Error())
 				return err
 			}
 		case StateMonitoring:
-			if err := w.monitoringMode(ctx); err != nil {
+			if err := w.monitoringMode(workCtx); err != nil {
 				log.Error("monitoring mode error", zap.Error(err))
-				w.transitionToError(ctx, err.Error())
+				w.transitionToError(workCtx, err.Error())
 				return err
 			}
 		case StateCompleted:
@@ -179,9 +219,14 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 		if w.getState() == StateError {
 			return fmt.Errorf("worker in error state")
 		}
+		if w.isShutdownRequested() {
+			log.Info("shutdown requested, leaving waiting mode")
+			return nil
+		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-w.shutdownCh:
+			log.Info("shutdown requested, leaving waiting mode")
+			return nil
 		case <-ticker.C:
 			isLive, info, err := w.ytdlpClient.IsStreamLive(ctx, w.cfg.StreamURL)
 			if err != nil {
@@ -277,13 +322,6 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get manifest URL: %w", err)
 	}
-	if w.isDASHManifestURL(manifestURL) {
-		if err := w.handleDASHManifest(ctx, manifestURL); err != nil {
-			return err
-		}
-		w.reportStatus(ctx, db.StatusCompleted, nil)
-		return nil
-	}
 	w.mu.Lock()
 	w.currentManifestURL = manifestURL
 	w.mu.Unlock()
@@ -297,6 +335,10 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 		if w.getState() == StateError {
 			return fmt.Errorf("worker in error state")
 		}
+		if w.isShutdownRequested() {
+			log.Info("shutdown requested, stopping new analysis")
+			return nil
+		}
 		start := time.Now()
 		if err := w.checkLiveStatus(ctx); err != nil {
 			return err
@@ -306,20 +348,14 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 		}
 		for {
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-w.shutdownCh:
+				log.Info("shutdown requested, stopping manifest refresh")
+				return nil
 			case <-manifestRefreshTicker.C:
 				newURL, err := w.ytdlpClient.GetManifestURL(ctx, w.cfg.StreamURL)
 				if err != nil {
 					log.Warn("failed to refresh manifest URL", zap.Error(err))
 				} else {
-					if w.isDASHManifestURL(newURL) {
-						if err := w.handleDASHManifest(ctx, newURL); err != nil {
-							return err
-						}
-						w.reportStatus(ctx, db.StatusCompleted, nil)
-						return nil
-					}
 					w.mu.Lock()
 					w.currentManifestURL = newURL
 					w.mu.Unlock()
@@ -329,6 +365,10 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 			}
 		}
 	Analyze:
+		if w.isShutdownRequested() {
+			log.Info("shutdown requested, skipping analysis cycle")
+			return nil
+		}
 		if err := w.analyzeLatestSegment(ctx); err != nil {
 			log.Warn("segment analysis failed", zap.Error(err))
 			if w.handleSegmentError(ctx, err) {
@@ -346,9 +386,10 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 		if remaining := w.cfg.AnalysisInterval - elapsed; remaining > 0 {
 			timer := time.NewTimer(remaining)
 			select {
-			case <-ctx.Done():
+			case <-w.shutdownCh:
 				timer.Stop()
-				return ctx.Err()
+				log.Info("shutdown requested, stopping analysis wait")
+				return nil
 			case <-timer.C:
 			}
 		}
@@ -360,6 +401,11 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	w.mu.Lock()
 	manifestURL := w.currentManifestURL
 	w.mu.Unlock()
+
+	if w.isShutdownRequested() {
+		log.Info("shutdown requested, skip fetching new segment")
+		return nil
+	}
 
 	// Get latest segment info
 	isEndList, err := w.manifestParser.IsEndList(ctx, manifestURL)
@@ -400,16 +446,25 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fetch segment: %w", err)
 	}
+	if w.isShutdownRequested() {
+		log.Info("shutdown requested, skip analyzing segment")
+		return nil
+	}
 
 	// Save segment to temp file
 	segmentPath, err := w.analyzer.SaveSegment(w.cfg.MonitorID, data)
 	if err != nil {
 		return fmt.Errorf("save segment: %w", err)
 	}
-	defer w.analyzer.CleanupSegment(segmentPath)
+	defer func() {
+		if err := w.analyzer.CleanupSegment(segmentPath); err != nil {
+			log.Warn("failed to cleanup segment file", zap.Error(err))
+		}
+	}()
 
-	// Analyze segment
-	result, err := w.analyzer.AnalyzeSegment(ctx, segmentPath)
+	// Analyze segment; allow in-flight ffmpeg work to finish even if shutdown is requested.
+	analysisCtx := context.WithoutCancel(ctx)
+	result, err := w.analyzer.AnalyzeSegment(analysisCtx, segmentPath)
 	if err != nil {
 		return fmt.Errorf("analyze segment: %w", err)
 	}
@@ -613,6 +668,14 @@ func (w *Worker) sendWebhook(ctx context.Context, eventType webhook.EventType, d
 
 	result := w.webhookSender.Send(ctx, w.cfg.WebhookURL, payload)
 	if !result.Success {
+		if w.isShutdownRequested() || ctx.Err() != nil {
+			log.Warn("webhook delivery failed during shutdown",
+				zap.String("event_type", string(eventType)),
+				zap.Int("attempts", result.Attempts),
+				zap.String("error", result.Error),
+			)
+			return
+		}
 		log.Error("webhook delivery failed",
 			zap.String("event_type", string(eventType)),
 			zap.Int("attempts", result.Attempts),
@@ -622,6 +685,13 @@ func (w *Worker) sendWebhook(ctx context.Context, eventType webhook.EventType, d
 		// Per requirements: if webhook fails after all retries, delete the monitoring job
 		// (don't send monitor.error event)
 		w.setState(StateError)
+		if w.callbackClient != nil {
+			terminateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := w.callbackClient.TerminateMonitor(terminateCtx, w.cfg.MonitorID, "webhook_delivery_failed"); err != nil {
+				log.Error("failed to request monitor termination", zap.Error(err))
+			}
+		}
 	}
 }
 
@@ -663,29 +733,6 @@ func (w *Worker) checkLiveStatus(ctx context.Context) error {
 		}
 		w.setState(StateCompleted)
 	}
-	return nil
-}
-
-func (w *Worker) isDASHManifestURL(manifestURL string) bool {
-	parsed, err := url.Parse(manifestURL)
-	if err != nil {
-		return false
-	}
-	return strings.HasSuffix(strings.ToLower(parsed.Path), ".mpd")
-}
-
-func (w *Worker) handleDASHManifest(ctx context.Context, manifestURL string) error {
-	w.mu.Lock()
-	w.streamStatus = db.StreamStatusEnded
-	w.mu.Unlock()
-	w.sendWebhook(ctx, webhook.EventStreamEnded, map[string]interface{}{
-		"reason":       "dash_not_supported",
-		"manifest_url": manifestURL,
-	})
-	if w.getState() == StateError {
-		return fmt.Errorf("webhook delivery failed")
-	}
-	w.setState(StateCompleted)
 	return nil
 }
 
@@ -740,11 +787,32 @@ func (w *Worker) transitionToError(ctx context.Context, reason string) {
 func (w *Worker) gracefulShutdown(ctx context.Context) error {
 	log.Info("performing graceful shutdown")
 
-	// Clean up temp files
-	w.analyzer.CleanupMonitor(w.cfg.MonitorID)
+	w.reportStatus(ctx, db.StatusStopped, nil)
 
 	log.Info("graceful shutdown complete")
 	return nil
+}
+
+func (w *Worker) requestShutdown() bool {
+	w.mu.Lock()
+	if w.shutdownRequested {
+		w.mu.Unlock()
+		return false
+	}
+	w.shutdownRequested = true
+	close(w.shutdownCh)
+	cancelWork := w.cancelWork
+	w.mu.Unlock()
+	if cancelWork != nil {
+		cancelWork()
+	}
+	return true
+}
+
+func (w *Worker) isShutdownRequested() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.shutdownRequested
 }
 
 // getState returns the current state.

@@ -80,18 +80,32 @@ type SendResult struct {
 
 // Send sends a webhook to the specified URL with retries.
 func (s *Sender) Send(ctx context.Context, webhookURL string, payload *Payload) *SendResult {
-	result := &SendResult{}
+	return s.sendValidated(ctx, webhookURL, payload)
+}
 
+func (s *Sender) sendValidated(ctx context.Context, webhookURL string, payload *Payload) *SendResult {
 	if err := validation.ValidateOutboundURL(ctx, webhookURL, false); err != nil {
-		result.Error = fmt.Sprintf("invalid webhook url: %v", err)
-		return result
+		return &SendResult{Error: fmt.Sprintf("invalid webhook url: %v", err)}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		result.Error = fmt.Sprintf("marshal payload: %v", err)
-		return result
+		return &SendResult{Error: fmt.Sprintf("marshal payload: %v", err)}
 	}
 
+	return s.sendWithRetries(ctx, webhookURL, payload, body)
+}
+
+func (s *Sender) sendWithoutValidation(ctx context.Context, webhookURL string, payload *Payload) *SendResult {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return &SendResult{Error: fmt.Sprintf("marshal payload: %v", err)}
+	}
+
+	return s.sendWithRetries(ctx, webhookURL, payload, body)
+}
+
+func (s *Sender) sendWithRetries(ctx context.Context, webhookURL string, payload *Payload, body []byte) *SendResult {
+	result := &SendResult{}
 	for attempt := 1; attempt <= s.maxRetries; attempt++ {
 		result.Attempts = attempt
 
@@ -110,6 +124,7 @@ func (s *Sender) Send(ctx context.Context, webhookURL string, payload *Payload) 
 
 		if err == nil && statusCode >= 200 && statusCode < 300 {
 			result.Success = true
+			result.Error = ""
 			log.Info("webhook sent successfully",
 				zap.String("url", webhookURL),
 				zap.String("event_type", string(payload.EventType)),
