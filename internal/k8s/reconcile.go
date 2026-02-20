@@ -58,7 +58,7 @@ func (r *Reconciler) RunPeriodic(ctx context.Context, interval time.Duration) {
 			log.Info("periodic reconciliation stopped")
 			return
 		case <-ticker.C:
-			result, err := r.ReconcileStartup(ctx)
+			result, err := r.ReconcileStartup(context.Background())
 			if err != nil {
 				log.Error("periodic reconciliation failed", zap.Error(err))
 				continue

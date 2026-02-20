@@ -680,11 +680,13 @@ func (w *Worker) sendWebhook(ctx context.Context, eventType webhook.EventType, d
 
 	// Report webhook event to gateway for audit logging (best-effort)
 	if w.callbackClient != nil {
+		// Shallow-copy the map so the goroutine holds an independent snapshot.
+		dataCopy := copyMap(data)
 		report := &WebhookEventReport{
 			EventType:       string(eventType),
 			WebhookStatus:   "sent",
 			WebhookAttempts: result.Attempts,
-			Payload:         data,
+			Payload:         dataCopy,
 		}
 		if !result.Success {
 			report.WebhookStatus = "failed"
@@ -867,4 +869,15 @@ func (w *Worker) SetMetadata(metadata json.RawMessage) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.metadata = metadata
+}
+
+func copyMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	cp := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	return cp
 }

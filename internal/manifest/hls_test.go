@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+func newTestParser() *Parser {
+	parser := NewParserWithLimit(2*time.Second, 1024)
+	parser.httpClient = http.DefaultClient
+	return parser
+}
+
 func TestGetLatestSegmentHLSMediaPlaylist(t *testing.T) {
 	m3u8 := `#EXTM3U
 #EXT-X-VERSION:3
@@ -27,8 +33,7 @@ segment102.ts
 	}))
 	defer server.Close()
 
-	parser := NewParserWithLimit(2*time.Second, 1024)
-	parser.httpClient = http.DefaultClient
+	parser := newTestParser()
 
 	segment, err := parser.GetLatestSegment(context.Background(), server.URL+"/stream/playlist.m3u8")
 	if err != nil {
@@ -67,12 +72,14 @@ seg50.ts
 seg51.ts
 `
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		w.WriteHeader(http.StatusOK)
 		switch r.URL.Path {
 		case "/master.m3u8":
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(master))
 		case "/media/720p.m3u8":
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(media))
 		default:
 			http.NotFound(w, r)
@@ -80,8 +87,7 @@ seg51.ts
 	}))
 	defer server.Close()
 
-	parser := NewParserWithLimit(2*time.Second, 1024)
-	parser.httpClient = http.DefaultClient
+	parser := newTestParser()
 
 	segment, err := parser.GetLatestSegment(context.Background(), server.URL+"/master.m3u8")
 	if err != nil {
@@ -116,8 +122,7 @@ func TestGetLatestSegmentHLSEmptyPlaylist(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser := NewParserWithLimit(2*time.Second, 1024)
-	parser.httpClient = http.DefaultClient
+	parser := newTestParser()
 
 	_, err := parser.GetLatestSegment(context.Background(), server.URL+"/empty.m3u8")
 	if err == nil {
@@ -142,8 +147,7 @@ segment2.ts
 	}))
 	defer server.Close()
 
-	parser := NewParserWithLimit(2*time.Second, 1024)
-	parser.httpClient = http.DefaultClient
+	parser := newTestParser()
 
 	ended, err := parser.IsEndList(context.Background(), server.URL+"/live.m3u8")
 	if err != nil {
@@ -172,8 +176,7 @@ segment2.ts
 	}))
 	defer server.Close()
 
-	parser := NewParserWithLimit(2*time.Second, 1024)
-	parser.httpClient = http.DefaultClient
+	parser := newTestParser()
 
 	ended, err := parser.IsEndList(context.Background(), server.URL+"/ended.m3u8")
 	if err != nil {
@@ -201,8 +204,7 @@ func TestGetLatestSegmentHLSRelativeURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parser := NewParserWithLimit(2*time.Second, 1024)
-	parser.httpClient = http.DefaultClient
+	parser := newTestParser()
 
 	segment, err := parser.GetLatestSegment(context.Background(), server.URL+"/hls/playlist.m3u8")
 	if err != nil {
