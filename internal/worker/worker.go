@@ -51,8 +51,8 @@ type SegmentAnalyzer interface {
 
 // WebhookEventReport contains the result of a webhook delivery for audit logging.
 type WebhookEventReport struct {
-	EventType       string                 `json:"event_type"`
-	WebhookStatus   string                 `json:"webhook_status"`
+	EventType       webhook.EventType      `json:"event_type"`
+	WebhookStatus   db.WebhookStatus       `json:"webhook_status"`
 	WebhookAttempts int                    `json:"webhook_attempts"`
 	WebhookError    *string                `json:"webhook_error,omitempty"`
 	Payload         map[string]interface{} `json:"payload,omitempty"`
@@ -680,16 +680,16 @@ func (w *Worker) sendWebhook(ctx context.Context, eventType webhook.EventType, d
 
 	// Report webhook event to gateway for audit logging (best-effort)
 	if w.callbackClient != nil {
-		// Shallow-copy the map so the goroutine holds an independent snapshot.
-		dataCopy := copyMap(data)
+		// Deep-copy the map so the goroutine holds a fully independent snapshot.
+		dataCopy := deepCopyMap(data)
 		report := &WebhookEventReport{
-			EventType:       string(eventType),
-			WebhookStatus:   string(db.WebhookStatusSent),
+			EventType:       eventType,
+			WebhookStatus:   db.WebhookStatusSent,
 			WebhookAttempts: result.Attempts,
 			Payload:         dataCopy,
 		}
 		if !result.Success {
-			report.WebhookStatus = string(db.WebhookStatusFailed)
+			report.WebhookStatus = db.WebhookStatusFailed
 			errStr := result.Error
 			report.WebhookError = &errStr
 		}
@@ -871,13 +871,19 @@ func (w *Worker) SetMetadata(metadata json.RawMessage) {
 	w.metadata = metadata
 }
 
-func copyMap(m map[string]interface{}) map[string]interface{} {
+// deepCopyMap returns a deep copy of m via JSON round-trip so nested
+// maps/slices are fully independent of the original.
+func deepCopyMap(m map[string]interface{}) map[string]interface{} {
 	if m == nil {
 		return nil
 	}
-	cp := make(map[string]interface{}, len(m))
-	for k, v := range m {
-		cp[k] = v
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil
+	}
+	var cp map[string]interface{}
+	if err := json.Unmarshal(b, &cp); err != nil {
+		return nil
 	}
 	return cp
 }
