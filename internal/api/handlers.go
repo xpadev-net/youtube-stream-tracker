@@ -138,6 +138,10 @@ func (h *Handler) CreateMonitor(c *gin.Context) {
 
 	// Build config
 	config := applyConfigOverrides(db.DefaultMonitorConfig(), req.Config)
+	if err := config.Validate(); err != nil {
+		httpapi.RespondError(c, http.StatusBadRequest, httpapi.ErrCodeInvalidConfig, err.Error())
+		return
+	}
 
 	// Build metadata
 	var metadata json.RawMessage
