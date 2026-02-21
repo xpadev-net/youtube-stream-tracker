@@ -75,6 +75,9 @@ func (c MonitorConfig) Validate() error {
 	if c.SilenceThresholdSec < 0 {
 		return fmt.Errorf("silence_threshold_sec must be non-negative")
 	}
+	if c.SilenceDBThreshold > 0 {
+		return fmt.Errorf("silence_db_threshold must be non-positive (in dB)")
+	}
 	if c.StartDelayToleranceSec < 0 {
 		return fmt.Errorf("start_delay_tolerance_sec must be non-negative")
 	}
