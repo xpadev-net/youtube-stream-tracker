@@ -227,7 +227,9 @@ func runCleanupLoop(ctx context.Context, repo *db.MonitorRepository, interval, r
 			return
 		case <-ticker.C:
 			cutoff := time.Now().Add(-retention)
-			deleted, err := repo.DeleteStaleMonitors(context.Background(), cutoff)
+			opCtx, opCancel := context.WithTimeout(ctx, 30*time.Second)
+			deleted, err := repo.DeleteStaleMonitors(opCtx, cutoff)
+			opCancel()
 			if err != nil {
 				log.Error("monitor cleanup failed", zap.Error(err))
 			} else if deleted > 0 {

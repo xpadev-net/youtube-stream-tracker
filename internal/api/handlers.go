@@ -749,6 +749,10 @@ func (h *Handler) PatchMonitor(c *gin.Context) {
 		if req.Config.StartDelayToleranceSec != nil {
 			mergedConfig.StartDelayToleranceSec = *req.Config.StartDelayToleranceSec
 		}
+		if err := mergedConfig.Validate(); err != nil {
+			httpapi.RespondError(c, http.StatusBadRequest, httpapi.ErrCodeInvalidConfig, err.Error())
+			return
+		}
 		params.Config = &mergedConfig
 	}
 
@@ -759,7 +763,7 @@ func (h *Handler) PatchMonitor(c *gin.Context) {
 			return
 		}
 		if errors.Is(err, db.ErrMonitorNotActive) {
-			httpapi.RespondError(c, http.StatusConflict, httpapi.ErrCodeBadRequest,
+			httpapi.RespondConflict(c, httpapi.ErrCodeMonitorNotActive,
 				"Monitor is not in an active state and cannot be updated")
 			return
 		}

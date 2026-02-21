@@ -491,12 +491,16 @@ func (r *MonitorRepository) UpdateMonitor(ctx context.Context, id string, params
 		argIdx++
 	}
 
+	// Parameterize status constants instead of interpolating them
+	statusPlaceholders := fmt.Sprintf("$%d, $%d, $%d", argIdx, argIdx+1, argIdx+2)
+	args = append(args, StatusInitializing, StatusWaiting, StatusMonitoring)
+
 	query := fmt.Sprintf(`
 		UPDATE monitors
 		SET %s
-		WHERE id = $1 AND status IN ('%s', '%s', '%s')
+		WHERE id = $1 AND status IN (%s)
 		RETURNING id, stream_url, callback_url, config, metadata, status, pod_name, created_at, updated_at
-	`, strings.Join(setClauses, ", "), StatusInitializing, StatusWaiting, StatusMonitoring)
+	`, strings.Join(setClauses, ", "), statusPlaceholders)
 
 	var monitor Monitor
 	var configJSON []byte

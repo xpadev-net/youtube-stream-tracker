@@ -194,6 +194,12 @@ func (c *Client) CreateWorkerPod(ctx context.Context, params CreatePodParams) (*
 						EmptyDir: &corev1.EmptyDirVolumeSource{},
 					},
 				},
+				{
+					Name: "tmp",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
 			},
 			Containers: []corev1.Container{
 				{
@@ -204,6 +210,10 @@ func (c *Client) CreateWorkerPod(ctx context.Context, params CreatePodParams) (*
 						{ContainerPort: 8081, Protocol: corev1.ProtocolTCP},
 					},
 					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "tmp",
+							MountPath: "/tmp",
+						},
 						{
 							Name:      "workdir",
 							MountPath: "/tmp/segments",

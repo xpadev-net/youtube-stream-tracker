@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"container/heap"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -69,6 +70,40 @@ func InternalAPIKeyAuth(internalAPIKey string) gin.HandlerFunc {
 
 const defaultMaxVisitors = 10000
 
+// visitorEntry represents a visitor tracked in the heap.
+type visitorEntry struct {
+	key      string
+	lastSeen time.Time
+	index    int // position in the heap
+}
+
+// visitorHeap implements heap.Interface, ordered by lastSeen (oldest first).
+type visitorHeap []*visitorEntry
+
+func (h visitorHeap) Len() int            { return len(h) }
+func (h visitorHeap) Less(i, j int) bool   { return h[i].lastSeen.Before(h[j].lastSeen) }
+func (h visitorHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index = i
+	h[j].index = j
+}
+
+func (h *visitorHeap) Push(x interface{}) {
+	entry := x.(*visitorEntry)
+	entry.index = len(*h)
+	*h = append(*h, entry)
+}
+
+func (h *visitorHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	entry := old[n-1]
+	old[n-1] = nil
+	entry.index = -1
+	*h = old[:n-1]
+	return entry
+}
+
 type rateLimiter struct {
 	limit       rate.Limit
 	burst       int
@@ -76,7 +111,8 @@ type rateLimiter struct {
 	maxVisitors int
 	mu          sync.Mutex
 	visitors    map[string]*rate.Limiter
-	lastSeen    map[string]time.Time
+	entries     map[string]*visitorEntry
+	heap        visitorHeap
 }
 
 type limiterRegistry struct {
@@ -98,7 +134,8 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 		window:      window,
 		maxVisitors: defaultMaxVisitors,
 		visitors:    make(map[string]*rate.Limiter),
-		lastSeen:    make(map[string]time.Time),
+		entries:     make(map[string]*visitorEntry),
+		heap:        make(visitorHeap, 0),
 	}
 }
 
@@ -107,11 +144,10 @@ func (l *rateLimiter) cleanup(now time.Time) {
 	defer l.mu.Unlock()
 
 	cutoff := now.Add(-l.window)
-	for key, seen := range l.lastSeen {
-		if seen.Before(cutoff) {
-			delete(l.lastSeen, key)
-			delete(l.visitors, key)
-		}
+	for l.heap.Len() > 0 && l.heap[0].lastSeen.Before(cutoff) {
+		entry := heap.Pop(&l.heap).(*visitorEntry)
+		delete(l.visitors, entry.key)
+		delete(l.entries, entry.key)
 	}
 }
 
@@ -120,26 +156,25 @@ func (l *rateLimiter) getLimiter(key string) *rate.Limiter {
 	defer l.mu.Unlock()
 
 	limiter, exists := l.visitors[key]
+	now := time.Now()
 	if !exists {
 		if len(l.visitors) >= l.maxVisitors {
-			// Evict the oldest entry to make room
-			var oldestKey string
-			var oldestTime time.Time
-			for k, t := range l.lastSeen {
-				if oldestKey == "" || t.Before(oldestTime) {
-					oldestKey = k
-					oldestTime = t
-				}
-			}
-			if oldestKey != "" {
-				delete(l.visitors, oldestKey)
-				delete(l.lastSeen, oldestKey)
-			}
+			// Evict the oldest entry via heap pop - O(log n)
+			entry := heap.Pop(&l.heap).(*visitorEntry)
+			delete(l.visitors, entry.key)
+			delete(l.entries, entry.key)
 		}
 		limiter = rate.NewLimiter(l.limit, l.burst)
 		l.visitors[key] = limiter
+		entry := &visitorEntry{key: key, lastSeen: now}
+		l.entries[key] = entry
+		heap.Push(&l.heap, entry)
+	} else {
+		// Update lastSeen and fix heap position - O(log n)
+		entry := l.entries[key]
+		entry.lastSeen = now
+		heap.Fix(&l.heap, entry.index)
 	}
-	l.lastSeen[key] = time.Now()
 	return limiter
 }
 
