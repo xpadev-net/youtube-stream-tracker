@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 	"golang.org/x/time/rate"
+
+	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
 )
 
 const (
@@ -166,12 +169,21 @@ func (l *rateLimiter) getLimiter(key string) *rate.Limiter {
 		// insert/delete to l.visitors is paired with heap.Push/heap.Pop.
 		if len(l.visitors) >= l.maxVisitors {
 			if l.minHeap.Len() == 0 {
-				// Should never happen if invariant holds; defensive guard.
-				panic("httpapi: rateLimiter invariant violated: visitors at capacity but minHeap is empty")
+				// Invariant violated — log and evict an arbitrary visitor as fallback.
+				log.Error("httpapi: rateLimiter invariant violated: visitors at capacity but minHeap is empty",
+					zap.Int("visitors", len(l.visitors)),
+					zap.Int("maxVisitors", l.maxVisitors),
+				)
+				for k := range l.visitors {
+					delete(l.visitors, k)
+					delete(l.entries, k)
+					break
+				}
+			} else {
+				entry := heap.Pop(&l.minHeap).(*visitorEntry)
+				delete(l.visitors, entry.key)
+				delete(l.entries, entry.key)
 			}
-			entry := heap.Pop(&l.minHeap).(*visitorEntry)
-			delete(l.visitors, entry.key)
-			delete(l.entries, entry.key)
 		}
 		limiter = rate.NewLimiter(l.limit, l.burst)
 		l.visitors[key] = limiter
@@ -206,6 +218,17 @@ func (r *limiterRegistry) get(limit int, window time.Duration) *rateLimiter {
 	return limiter
 }
 
+// Stop cancels the background cleanup goroutine. It is safe to call
+// multiple times; only the first call has any effect.
+func (r *limiterRegistry) Stop() {
+	r.mu.Lock()
+	cancel := r.cancel
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func (r *limiterRegistry) cleanupLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -215,10 +238,14 @@ func (r *limiterRegistry) cleanupLoop(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			r.mu.Lock()
+			snapshot := make([]*rateLimiter, 0, len(r.limiters))
 			for _, limiter := range r.limiters {
-				limiter.cleanup(now)
+				snapshot = append(snapshot, limiter)
 			}
 			r.mu.Unlock()
+			for _, limiter := range snapshot {
+				limiter.cleanup(now)
+			}
 		}
 	}
 }

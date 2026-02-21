@@ -695,25 +695,23 @@ func (h *Handler) PatchMonitor(c *gin.Context) {
 		}
 	}
 
-	// Get existing monitor to merge config
-	existing, err := h.repo.GetByID(c.Request.Context(), monitorID)
-	if err != nil {
-		if errors.Is(err, db.ErrMonitorNotFound) {
-			httpapi.RespondNotFound(c, "Monitor not found")
-			return
-		}
-		log.Error("failed to get monitor", zap.Error(err))
-		httpapi.RespondInternalError(c, "Failed to get monitor")
-		return
-	}
-
 	// Build update params
 	params := db.UpdateMonitorParams{
 		CallbackURL: req.CallbackURL,
 	}
 
-	// Merge config if provided
+	// Merge config if provided — only fetch existing monitor when needed
 	if req.Config != nil {
+		existing, err := h.repo.GetByID(c.Request.Context(), monitorID)
+		if err != nil {
+			if errors.Is(err, db.ErrMonitorNotFound) {
+				httpapi.RespondNotFound(c, "Monitor not found")
+				return
+			}
+			log.Error("failed to get monitor", zap.Error(err))
+			httpapi.RespondInternalError(c, "Failed to get monitor")
+			return
+		}
 		mergedConfig := applyConfigOverrides(existing.Config, req.Config)
 		if err := mergedConfig.Validate(); err != nil {
 			httpapi.RespondError(c, http.StatusBadRequest, httpapi.ErrCodeInvalidConfig, err.Error())
@@ -789,15 +787,19 @@ func (h *Handler) ListEvents(c *gin.Context) {
 	// Parse query parameters
 	var params db.ListEventsParams
 
+	params.Limit = 50
 	if limitStr := c.Query("limit"); limitStr != "" {
-		if limit, err := strconv.Atoi(limitStr); err == nil {
-			params.Limit = limit
+		if parsed, err := strconv.Atoi(limitStr); err == nil {
+			params.Limit = min(max(parsed, 0), 100)
 		}
+	}
+	if params.Limit == 0 {
+		params.Limit = 50
 	}
 
 	if offsetStr := c.Query("offset"); offsetStr != "" {
-		if offset, err := strconv.Atoi(offsetStr); err == nil {
-			params.Offset = offset
+		if parsed, err := strconv.Atoi(offsetStr); err == nil {
+			params.Offset = max(parsed, 0)
 		}
 	}
 
@@ -823,16 +825,11 @@ func (h *Handler) ListEvents(c *gin.Context) {
 		}
 	}
 
-	limit := params.Limit
-	if limit == 0 {
-		limit = 50
-	}
-
 	httpapi.RespondOK(c, ListEventsResponse{
 		Events: summaries,
 		Pagination: PaginationInfo{
 			Total:  total,
-			Limit:  limit,
+			Limit:  params.Limit,
 			Offset: params.Offset,
 		},
 	})
