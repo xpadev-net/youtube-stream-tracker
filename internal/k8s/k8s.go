@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -446,18 +447,41 @@ func (c *Client) GetWorkerPod(ctx context.Context, monitorID string) (*corev1.Po
 	return pod, nil
 }
 
-// ListWorkerPods lists all worker pods.
-func (c *Client) ListWorkerPods(ctx context.Context) ([]corev1.Pod, error) {
-	labelSelector := fmt.Sprintf("%s=%s", LabelApp, LabelAppValue)
+// workerLabelSelector returns the label selector string for worker pods.
+func workerLabelSelector() string {
+	return fmt.Sprintf("%s=%s", LabelApp, LabelAppValue)
+}
 
+// listWorkerPodList returns the full PodList including metadata (ResourceVersion).
+func (c *Client) listWorkerPodList(ctx context.Context) (*corev1.PodList, error) {
 	list, err := c.clientset.CoreV1().Pods(c.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
+		LabelSelector: workerLabelSelector(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
+	return list, nil
+}
 
+// ListWorkerPods lists all worker pods.
+func (c *Client) ListWorkerPods(ctx context.Context) ([]corev1.Pod, error) {
+	list, err := c.listWorkerPodList(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return list.Items, nil
+}
+
+// WatchWorkerPods starts a watch on worker pods from the given resource version.
+func (c *Client) WatchWorkerPods(ctx context.Context, resourceVersion string) (watch.Interface, error) {
+	watcher, err := c.clientset.CoreV1().Pods(c.namespace).Watch(ctx, metav1.ListOptions{
+		LabelSelector:  workerLabelSelector(),
+		ResourceVersion: resourceVersion,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("watch pods: %w", err)
+	}
+	return watcher, nil
 }
 
 // IsPodRunning checks if a pod is in running state.
