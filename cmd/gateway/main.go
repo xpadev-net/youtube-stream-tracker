@@ -70,6 +70,22 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to create k8s client", zap.Error(err))
 	}
+
+	// Resolve owner deployment for ownerReferences on worker pods
+	if cfg.PodName != "" {
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer resolveCancel()
+		ownerRef, err := k8sClient.ResolveOwnerDeployment(resolveCtx, cfg.PodName)
+		if err != nil {
+			log.Warn("failed to resolve owner deployment, worker pods will not have ownerReferences",
+				zap.Error(err))
+		} else {
+			k8sClient.SetOwnerReference(ownerRef)
+			log.Info("owner deployment resolved for worker pod ownerReferences",
+				zap.String("deployment", ownerRef.Name))
+		}
+	}
+
 	webhookSender := webhook.NewSender(cfg.WebhookSigningKey)
 	reconciler := k8s.NewReconciler(k8sClient, repo, webhookSender, cfg.ReconcileWebhookURL, cfg.ReconcileTimeout)
 
@@ -100,6 +116,11 @@ func main() {
 			)
 		}
 	}
+
+	// Start pod failure watcher for real-time webhook notifications
+	podWatcher := k8s.NewPodWatcher(k8sClient, repo, webhookSender)
+	watcherCtx, watcherCancel := context.WithCancel(context.Background())
+	go podWatcher.Run(watcherCtx)
 
 	// Start periodic reconciliation if interval is configured
 	var reconcileCancel context.CancelFunc
@@ -174,6 +195,9 @@ func main() {
 	<-quit
 
 	log.Info("shutting down server")
+
+	// Stop pod failure watcher
+	watcherCancel()
 
 	// Stop periodic reconciliation
 	if reconcileCancel != nil {

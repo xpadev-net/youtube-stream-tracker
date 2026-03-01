@@ -70,7 +70,7 @@ seg51.ts
 			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(master))
-		case "/media/720p.m3u8":
+		case "/media/480p.m3u8":
 			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(media))

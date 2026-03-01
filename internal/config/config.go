@@ -29,6 +29,7 @@ type GatewayConfig struct {
 	ReconcileWebhookURL               string
 
 	// Kubernetes
+	PodName           string
 	Namespace         string
 	WorkerImage       string
 	WorkerImageTag    string
@@ -108,6 +109,7 @@ func LoadGatewayConfig() (*GatewayConfig, error) {
 		GatewaySecretsName:                getEnv("GATEWAY_SECRETS_NAME", "stream-monitor-secrets"),
 		GatewayInternalAPIKeySecretKey:    getEnv("GATEWAY_INTERNAL_API_KEY_SECRET_KEY", "internal-api-key"),
 		GatewayWebhookSigningKeySecretKey: getEnv("GATEWAY_WEBHOOK_SIGNING_KEY_SECRET_KEY", "webhook-signing-key"),
+		PodName:                           getEnv("POD_NAME", ""),
 		Namespace:                         getEnv("NAMESPACE", "default"),
 		WorkerImage:                       getEnv("WORKER_IMAGE", "stream-monitor-worker"),
 		WorkerImageTag:                    getEnv("WORKER_IMAGE_TAG", "latest"),

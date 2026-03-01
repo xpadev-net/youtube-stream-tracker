@@ -2,6 +2,9 @@ package k8s
 
 import (
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestPodNamePrefix(t *testing.T) {
@@ -71,6 +74,119 @@ func TestConfigStructure(t *testing.T) {
 
 	if cfg.WorkerImage != "stream-monitor-worker" {
 		t.Errorf("Config.WorkerImage = %v, want stream-monitor-worker", cfg.WorkerImage)
+	}
+}
+
+func TestBuildOwnerReference(t *testing.T) {
+	uid := types.UID("test-uid-12345")
+	ref := BuildOwnerReference("my-deployment", uid)
+
+	if ref.APIVersion != "apps/v1" {
+		t.Errorf("APIVersion = %v, want apps/v1", ref.APIVersion)
+	}
+	if ref.Kind != "Deployment" {
+		t.Errorf("Kind = %v, want Deployment", ref.Kind)
+	}
+	if ref.Name != "my-deployment" {
+		t.Errorf("Name = %v, want my-deployment", ref.Name)
+	}
+	if ref.UID != uid {
+		t.Errorf("UID = %v, want %v", ref.UID, uid)
+	}
+	if ref.BlockOwnerDeletion == nil || !*ref.BlockOwnerDeletion {
+		t.Error("BlockOwnerDeletion should be true")
+	}
+	if ref.Controller != nil && *ref.Controller {
+		t.Error("Controller should not be true")
+	}
+}
+
+func TestBuildOwnerReferences_NilWhenNoOwnerRef(t *testing.T) {
+	client := &Client{}
+
+	refs := client.buildOwnerReferences()
+	if refs != nil {
+		t.Errorf("buildOwnerReferences() = %v, want nil", refs)
+	}
+}
+
+func TestBuildOwnerReferences_WithOwnerRef(t *testing.T) {
+	uid := types.UID("deploy-uid-abc")
+	ref := BuildOwnerReference("stream-monitor-gateway", uid)
+
+	client := &Client{}
+	client.SetOwnerReference(ref)
+
+	refs := client.buildOwnerReferences()
+	if len(refs) != 1 {
+		t.Fatalf("buildOwnerReferences() returned %d refs, want 1", len(refs))
+	}
+
+	got := refs[0]
+	if got.Name != "stream-monitor-gateway" {
+		t.Errorf("OwnerReference.Name = %v, want stream-monitor-gateway", got.Name)
+	}
+	if got.UID != uid {
+		t.Errorf("OwnerReference.UID = %v, want %v", got.UID, uid)
+	}
+	if got.APIVersion != "apps/v1" {
+		t.Errorf("OwnerReference.APIVersion = %v, want apps/v1", got.APIVersion)
+	}
+	if got.Kind != "Deployment" {
+		t.Errorf("OwnerReference.Kind = %v, want Deployment", got.Kind)
+	}
+}
+
+func TestFindOwnerReference(t *testing.T) {
+	refs := []metav1.OwnerReference{
+		{
+			APIVersion: "v1",
+			Kind:       "Pod",
+			Name:       "some-pod",
+			UID:        "pod-uid",
+		},
+		{
+			APIVersion: "apps/v1",
+			Kind:       "ReplicaSet",
+			Name:       "some-rs",
+			UID:        "rs-uid",
+		},
+		{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+			Name:       "some-deploy",
+			UID:        "deploy-uid",
+		},
+	}
+
+	// Find ReplicaSet
+	rs := findOwnerReference(refs, "ReplicaSet")
+	if rs == nil {
+		t.Fatal("findOwnerReference(ReplicaSet) returned nil")
+	}
+	if rs.Name != "some-rs" {
+		t.Errorf("findOwnerReference(ReplicaSet).Name = %v, want some-rs", rs.Name)
+	}
+
+	// Find Deployment
+	deploy := findOwnerReference(refs, "Deployment")
+	if deploy == nil {
+		t.Fatal("findOwnerReference(Deployment) returned nil")
+	}
+	if deploy.Name != "some-deploy" {
+		t.Errorf("findOwnerReference(Deployment).Name = %v, want some-deploy", deploy.Name)
+	}
+
+	// Find nonexistent kind
+	notFound := findOwnerReference(refs, "StatefulSet")
+	if notFound != nil {
+		t.Errorf("findOwnerReference(StatefulSet) = %v, want nil", notFound)
+	}
+
+	// Empty refs
+	empty := findOwnerReference(nil, "Deployment")
+	if empty != nil {
+		t.Errorf("findOwnerReference(nil) = %v, want nil", empty)
 	}
 }
 

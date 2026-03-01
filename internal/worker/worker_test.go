@@ -347,6 +347,33 @@ func newTestWorkerConfig() *config.WorkerConfig {
 	}
 }
 
+func newTestWorkerForDetection(sender *captureWebhookSender) *Worker {
+	cfg := &config.WorkerConfig{
+		MonitorID:                  "mon-test",
+		StreamURL:                  "https://www.youtube.com/watch?v=test",
+		CallbackURL:                "http://example.com",
+		InternalAPIKey:             "internal-key",
+		WebhookURL:                 "http://example.com",
+		WebhookSigningKey:          "signing-key",
+		WaitingModeInitialInterval: 1 * time.Millisecond,
+		WaitingModeDelayedInterval: 1 * time.Millisecond,
+		ManifestFetchTimeout:       1 * time.Second,
+		ManifestRefreshInterval:    1 * time.Second,
+		SegmentFetchTimeout:        1 * time.Second,
+		SegmentMaxBytes:            1024,
+		AnalysisInterval:           1 * time.Second,
+		BlackoutThreshold:          30 * time.Second,
+		SilenceThreshold:           30 * time.Second,
+		SilenceDBThreshold:         -50,
+		DelayThreshold:             1 * time.Second,
+		FFmpegPath:                 "ffmpeg",
+		FFprobePath:                "ffprobe",
+		YtDlpPath:                  "yt-dlp",
+		StreamlinkPath:             "streamlink",
+	}
+	return NewWorkerWithDeps(cfg, &stubYtDlpClient{}, nil, nil, sender, &spyCallbackClient{})
+}
+
 func TestStreamSuspensionAlert(t *testing.T) {
 	cfg := newTestWorkerConfig()
 	parser := &configurableManifestParser{sequence: 5}
@@ -432,5 +459,152 @@ func TestNoFalsePositiveSuspension(t *testing.T) {
 
 	if len(sender.calls) != 0 {
 		t.Fatalf("expected 0 webhook calls, got %d", len(sender.calls))
+	}
+}
+
+func TestProcessBlackDetection_ImmediateAlert(t *testing.T) {
+	sender := &captureWebhookSender{}
+	worker := newTestWorkerForDetection(sender)
+
+	result := &ffmpeg.BlackDetectResult{FullyBlack: true, BlackRatio: 1.0}
+	worker.processBlackDetection(context.Background(), result, 2.0)
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("expected 1 webhook call, got %d", len(sender.calls))
+	}
+	if sender.calls[0].EventType != webhook.EventAlertBlackout {
+		t.Fatalf("event_type = %v, want %v", sender.calls[0].EventType, webhook.EventAlertBlackout)
+	}
+	if dur, ok := sender.calls[0].Data["duration_sec"].(float64); !ok || dur != 2.0 {
+		t.Fatalf("duration_sec = %v, want 2.0", sender.calls[0].Data["duration_sec"])
+	}
+	if thr, ok := sender.calls[0].Data["threshold_sec"].(int); !ok || thr != 30 {
+		t.Fatalf("threshold_sec = %v, want 30", sender.calls[0].Data["threshold_sec"])
+	}
+	if !worker.blackoutAlertSent {
+		t.Fatalf("expected blackoutAlertSent to be true")
+	}
+	if worker.blackoutEvents != 1 {
+		t.Fatalf("blackoutEvents = %d, want 1", worker.blackoutEvents)
+	}
+}
+
+func TestProcessBlackDetection_NoDuplicateAlert(t *testing.T) {
+	sender := &captureWebhookSender{}
+	worker := newTestWorkerForDetection(sender)
+
+	result := &ffmpeg.BlackDetectResult{FullyBlack: true, BlackRatio: 1.0}
+	worker.processBlackDetection(context.Background(), result, 2.0)
+	worker.processBlackDetection(context.Background(), result, 2.0)
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("expected 1 webhook call (no duplicate), got %d", len(sender.calls))
+	}
+	if worker.consecutiveBlack != 4.0 {
+		t.Fatalf("consecutiveBlack = %f, want 4.0", worker.consecutiveBlack)
+	}
+}
+
+func TestProcessSilenceDetection_ImmediateAlert(t *testing.T) {
+	sender := &captureWebhookSender{}
+	worker := newTestWorkerForDetection(sender)
+
+	result := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
+	worker.processSilenceDetection(context.Background(), result, 2.0)
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("expected 1 webhook call, got %d", len(sender.calls))
+	}
+	if sender.calls[0].EventType != webhook.EventAlertSilence {
+		t.Fatalf("event_type = %v, want %v", sender.calls[0].EventType, webhook.EventAlertSilence)
+	}
+	if dur, ok := sender.calls[0].Data["duration_sec"].(float64); !ok || dur != 2.0 {
+		t.Fatalf("duration_sec = %v, want 2.0", sender.calls[0].Data["duration_sec"])
+	}
+	if !worker.silenceAlertSent {
+		t.Fatalf("expected silenceAlertSent to be true")
+	}
+	if worker.silenceEvents != 1 {
+		t.Fatalf("silenceEvents = %d, want 1", worker.silenceEvents)
+	}
+}
+
+func TestProcessSilenceDetection_NoDuplicateAlert(t *testing.T) {
+	sender := &captureWebhookSender{}
+	worker := newTestWorkerForDetection(sender)
+
+	result := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
+	worker.processSilenceDetection(context.Background(), result, 2.0)
+	worker.processSilenceDetection(context.Background(), result, 2.0)
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("expected 1 webhook call (no duplicate), got %d", len(sender.calls))
+	}
+	if worker.consecutiveSilence != 4.0 {
+		t.Fatalf("consecutiveSilence = %f, want 4.0", worker.consecutiveSilence)
+	}
+}
+
+func TestProcessSilenceDetection_RecoveryUnchanged(t *testing.T) {
+	sender := &captureWebhookSender{}
+	worker := newTestWorkerForDetection(sender)
+
+	// First: trigger immediate silence alert
+	silentResult := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
+	worker.processSilenceDetection(context.Background(), silentResult, 2.0)
+
+	// Then: recovery (non-silent segment)
+	clearResult := &ffmpeg.SilenceDetectResult{FullySilent: false}
+	worker.processSilenceDetection(context.Background(), clearResult, 2.0)
+
+	if len(sender.calls) != 2 {
+		t.Fatalf("expected 2 webhook calls, got %d", len(sender.calls))
+	}
+	if sender.calls[0].EventType != webhook.EventAlertSilence {
+		t.Fatalf("first event_type = %v, want %v", sender.calls[0].EventType, webhook.EventAlertSilence)
+	}
+	if sender.calls[1].EventType != webhook.EventAlertSilenceRecovered {
+		t.Fatalf("second event_type = %v, want %v", sender.calls[1].EventType, webhook.EventAlertSilenceRecovered)
+	}
+	if worker.silenceAlertSent {
+		t.Fatalf("expected silenceAlertSent to be false after recovery")
+	}
+	if worker.consecutiveSilence != 0 {
+		t.Fatalf("consecutiveSilence = %f, want 0", worker.consecutiveSilence)
+	}
+	if worker.silenceStart != nil {
+		t.Fatalf("expected silenceStart to be nil after recovery")
+	}
+}
+
+func TestProcessBlackDetection_RecoveryUnchanged(t *testing.T) {
+	sender := &captureWebhookSender{}
+	worker := newTestWorkerForDetection(sender)
+
+	// First: trigger immediate blackout alert
+	blackResult := &ffmpeg.BlackDetectResult{FullyBlack: true, BlackRatio: 1.0}
+	worker.processBlackDetection(context.Background(), blackResult, 2.0)
+
+	// Then: recovery (non-black segment)
+	clearResult := &ffmpeg.BlackDetectResult{FullyBlack: false}
+	worker.processBlackDetection(context.Background(), clearResult, 2.0)
+
+	if len(sender.calls) != 2 {
+		t.Fatalf("expected 2 webhook calls, got %d", len(sender.calls))
+	}
+	if sender.calls[0].EventType != webhook.EventAlertBlackout {
+		t.Fatalf("first event_type = %v, want %v", sender.calls[0].EventType, webhook.EventAlertBlackout)
+	}
+	if sender.calls[1].EventType != webhook.EventAlertBlackoutRecovered {
+		t.Fatalf("second event_type = %v, want %v", sender.calls[1].EventType, webhook.EventAlertBlackoutRecovered)
+	}
+	if worker.blackoutAlertSent {
+		t.Fatalf("expected blackoutAlertSent to be false after recovery")
+	}
+	if worker.consecutiveBlack != 0 {
+		t.Fatalf("consecutiveBlack = %f, want 0", worker.consecutiveBlack)
+	}
+	if worker.blackoutStart != nil {
+		t.Fatalf("expected blackoutStart to be nil after recovery")
 	}
 }
