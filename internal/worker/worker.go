@@ -232,6 +232,7 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 
 	// Check if delayed alert should be sent
 	delayAlertSent := false
+	firstCheck := true
 
 	for {
 		if w.getState() == StateError {
@@ -241,92 +242,99 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 			log.Info("shutdown requested, leaving waiting mode")
 			return nil
 		}
-		select {
-		case <-w.shutdownCh:
-			log.Info("shutdown requested, leaving waiting mode")
-			return nil
-		case <-ticker.C:
-			isLive, info, err := w.ytdlpClient.IsStreamLive(ctx, w.cfg.StreamURL)
-			if err != nil {
-				log.Warn("failed to check stream status", zap.Error(err))
-				continue
+
+		// Perform the first check immediately; subsequent checks wait
+		// for the ticker interval to avoid hammering yt-dlp.
+		if !firstCheck {
+			select {
+			case <-w.shutdownCh:
+				log.Info("shutdown requested, leaving waiting mode")
+				return nil
+			case <-ticker.C:
+			}
+		}
+		firstCheck = false
+
+		isLive, info, err := w.ytdlpClient.IsStreamLive(ctx, w.cfg.StreamURL)
+		if err != nil {
+			log.Warn("failed to check stream status", zap.Error(err))
+			continue
+		}
+
+		// Update stream status
+		if isLive {
+			w.mu.Lock()
+			w.streamStatus = db.StreamStatusLive
+			w.mu.Unlock()
+
+			// Send stream started event
+			w.sendWebhook(ctx, webhook.EventStreamStarted, map[string]interface{}{
+				"title": info.Title,
+			})
+			if w.getState() == StateError {
+				w.reportStatus(ctx, db.StatusError, nil)
+				return fmt.Errorf("webhook delivery failed")
 			}
 
-			// Update stream status
-			if isLive {
-				w.mu.Lock()
-				w.streamStatus = db.StreamStatusLive
-				w.mu.Unlock()
+			// Transition to monitoring
+			w.setState(StateMonitoring)
+			log.Info("stream is live, transitioning to monitoring mode")
+			return nil
+		}
 
-				// Send stream started event
-				w.sendWebhook(ctx, webhook.EventStreamStarted, map[string]interface{}{
-					"title": info.Title,
+		// Check for scheduled start delay
+		if w.cfg.ScheduledStartTime != nil && time.Now().After(*w.cfg.ScheduledStartTime) {
+			if interval != w.cfg.WaitingModeDelayedInterval {
+				ticker.Stop()
+				interval = w.cfg.WaitingModeDelayedInterval
+				ticker = time.NewTicker(interval)
+			}
+		}
+		if w.cfg.ScheduledStartTime != nil && !delayAlertSent {
+			threshold := w.cfg.ScheduledStartTime.Add(w.cfg.DelayThreshold)
+			if time.Now().After(threshold) {
+				delay := time.Since(*w.cfg.ScheduledStartTime)
+				w.sendWebhook(ctx, webhook.EventStreamDelayed, map[string]interface{}{
+					"scheduled_start_time": w.cfg.ScheduledStartTime.Format(time.RFC3339),
+					"delay_sec":            int(delay.Seconds()),
+					"tolerance_sec":        int(w.cfg.DelayThreshold.Seconds()),
+				})
+				delayAlertSent = true
+			}
+		}
+
+		// Update status based on info
+		if info != nil {
+			switch info.LiveStatus {
+			case "is_upcoming":
+				w.mu.Lock()
+				w.streamStatus = db.StreamStatusScheduled
+				w.mu.Unlock()
+			case "was_live", "not_live":
+				// Stream ended before we could monitor it
+				w.mu.Lock()
+				w.streamStatus = db.StreamStatusEnded
+				w.mu.Unlock()
+				w.sendWebhook(ctx, webhook.EventStreamEnded, map[string]interface{}{
+					"reason": info.LiveStatus,
 				})
 				if w.getState() == StateError {
 					w.reportStatus(ctx, db.StatusError, nil)
 					return fmt.Errorf("webhook delivery failed")
 				}
-
-				// Transition to monitoring
-				w.setState(StateMonitoring)
-				log.Info("stream is live, transitioning to monitoring mode")
+				w.setState(StateCompleted)
+				w.reportStatus(ctx, db.StatusCompleted, nil)
 				return nil
 			}
-
-			// Check for scheduled start delay
-			if w.cfg.ScheduledStartTime != nil && time.Now().After(*w.cfg.ScheduledStartTime) {
-				if interval != w.cfg.WaitingModeDelayedInterval {
-					ticker.Stop()
-					interval = w.cfg.WaitingModeDelayedInterval
-					ticker = time.NewTicker(interval)
-				}
-			}
-			if w.cfg.ScheduledStartTime != nil && !delayAlertSent {
-				threshold := w.cfg.ScheduledStartTime.Add(w.cfg.DelayThreshold)
-				if time.Now().After(threshold) {
-					delay := time.Since(*w.cfg.ScheduledStartTime)
-					w.sendWebhook(ctx, webhook.EventStreamDelayed, map[string]interface{}{
-						"scheduled_start_time": w.cfg.ScheduledStartTime.Format(time.RFC3339),
-						"delay_sec":            int(delay.Seconds()),
-						"tolerance_sec":        int(w.cfg.DelayThreshold.Seconds()),
-					})
-					delayAlertSent = true
-				}
-			}
-
-			// Update status based on info
-			if info != nil {
-				switch info.LiveStatus {
-				case "is_upcoming":
-					w.mu.Lock()
-					w.streamStatus = db.StreamStatusScheduled
-					w.mu.Unlock()
-				case "was_live", "not_live":
-					// Stream ended before we could monitor it
-					w.mu.Lock()
-					w.streamStatus = db.StreamStatusEnded
-					w.mu.Unlock()
-					w.sendWebhook(ctx, webhook.EventStreamEnded, map[string]interface{}{
-						"reason": info.LiveStatus,
-					})
-					if w.getState() == StateError {
-						w.reportStatus(ctx, db.StatusError, nil)
-						return fmt.Errorf("webhook delivery failed")
-					}
-					w.setState(StateCompleted)
-					w.reportStatus(ctx, db.StatusCompleted, nil)
-					return nil
-				}
-			}
-
-			liveStatus := "unknown"
-			if info != nil {
-				liveStatus = info.LiveStatus
-			}
-			log.Debug("stream not yet live, continuing to wait",
-				zap.String("live_status", liveStatus),
-			)
 		}
+
+		liveStatus := "unknown"
+		if info != nil {
+			liveStatus = info.LiveStatus
+		}
+		log.Debug("stream not yet live, continuing to wait",
+			zap.String("live_status", liveStatus),
+		)
 	}
 }
 
