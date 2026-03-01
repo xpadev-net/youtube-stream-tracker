@@ -73,7 +73,9 @@ func main() {
 
 	// Resolve owner deployment for ownerReferences on worker pods
 	if cfg.PodName != "" {
-		ownerRef, err := k8sClient.ResolveOwnerDeployment(ctx, cfg.PodName)
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer resolveCancel()
+		ownerRef, err := k8sClient.ResolveOwnerDeployment(resolveCtx, cfg.PodName)
 		if err != nil {
 			log.Warn("failed to resolve owner deployment, worker pods will not have ownerReferences",
 				zap.Error(err))

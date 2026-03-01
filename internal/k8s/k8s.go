@@ -100,8 +100,8 @@ func (c *Client) SetOwnerReference(ref *metav1.OwnerReference) {
 }
 
 // ResolveOwnerDeployment resolves the owner Deployment by traversing the
-// owner chain: Pod → ReplicaSet → Deployment. Returns nil if the chain
-// cannot be resolved (e.g., pod is not managed by a Deployment).
+// owner chain: Pod → ReplicaSet → Deployment. Returns an error if the
+// chain cannot be resolved (e.g., pod is not managed by a Deployment).
 func (c *Client) ResolveOwnerDeployment(ctx context.Context, podName string) (*metav1.OwnerReference, error) {
 	// Get the gateway pod
 	pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, podName, metav1.GetOptions{})
