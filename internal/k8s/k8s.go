@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -39,6 +41,7 @@ type Client struct {
 	namespace   string
 	workerImage string
 	workerTag   string
+	ownerRef    *metav1.OwnerReference
 }
 
 // Config holds configuration for creating a K8s client.
@@ -89,6 +92,90 @@ func NewClient(cfg Config) (*Client, error) {
 		workerImage: cfg.WorkerImage,
 		workerTag:   cfg.WorkerImageTag,
 	}, nil
+}
+
+// SetOwnerReference sets the owner reference to be applied to worker pods.
+func (c *Client) SetOwnerReference(ref *metav1.OwnerReference) {
+	c.ownerRef = ref
+}
+
+// ResolveOwnerDeployment resolves the owner Deployment by traversing the
+// owner chain: Pod → ReplicaSet → Deployment. Returns an error if the
+// chain cannot be resolved (e.g., pod is not managed by a Deployment).
+func (c *Client) ResolveOwnerDeployment(ctx context.Context, podName string) (*metav1.OwnerReference, error) {
+	// Get the gateway pod
+	pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get gateway pod %q: %w", podName, err)
+	}
+
+	// Find the ReplicaSet owner
+	rsRef := findOwnerReference(pod.OwnerReferences, "ReplicaSet")
+	if rsRef == nil {
+		return nil, fmt.Errorf("gateway pod %q has no ReplicaSet owner", podName)
+	}
+
+	// Get the ReplicaSet
+	rs, err := c.clientset.AppsV1().ReplicaSets(c.namespace).Get(ctx, rsRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get ReplicaSet %q: %w", rsRef.Name, err)
+	}
+
+	// Find the Deployment owner
+	deployRef := findOwnerReference(rs.OwnerReferences, "Deployment")
+	if deployRef == nil {
+		return nil, fmt.Errorf("ReplicaSet %q has no Deployment owner", rsRef.Name)
+	}
+
+	// Get the Deployment to confirm it exists and get its UID
+	deploy, err := c.clientset.AppsV1().Deployments(c.namespace).Get(ctx, deployRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get Deployment %q: %w", deployRef.Name, err)
+	}
+
+	return buildDeploymentOwnerReference(deploy), nil
+}
+
+// buildOwnerReferences returns the ownerReferences slice for worker pods.
+// Returns nil if no owner reference is set.
+func (c *Client) buildOwnerReferences() []metav1.OwnerReference {
+	if c.ownerRef == nil {
+		return nil
+	}
+	return []metav1.OwnerReference{*c.ownerRef}
+}
+
+// findOwnerReference finds the first owner reference with the given kind.
+func findOwnerReference(refs []metav1.OwnerReference, kind string) *metav1.OwnerReference {
+	for i := range refs {
+		if refs[i].Kind == kind {
+			return &refs[i]
+		}
+	}
+	return nil
+}
+
+// buildDeploymentOwnerReference constructs an OwnerReference from a Deployment.
+func buildDeploymentOwnerReference(deploy *appsv1.Deployment) *metav1.OwnerReference {
+	return &metav1.OwnerReference{
+		APIVersion:         "apps/v1",
+		Kind:               "Deployment",
+		Name:               deploy.Name,
+		UID:                deploy.UID,
+		BlockOwnerDeletion: boolPtr(true),
+	}
+}
+
+// BuildOwnerReference constructs an OwnerReference from the given parameters.
+// Exported for testing purposes.
+func BuildOwnerReference(name string, uid types.UID) *metav1.OwnerReference {
+	return &metav1.OwnerReference{
+		APIVersion:         "apps/v1",
+		Kind:               "Deployment",
+		Name:               name,
+		UID:                uid,
+		BlockOwnerDeletion: boolPtr(true),
+	}
 }
 
 // CreatePodParams contains parameters for creating a worker pod.
@@ -183,6 +270,7 @@ func (c *Client) CreateWorkerPod(ctx context.Context, params CreatePodParams) (*
 				LabelApp:       LabelAppValue,
 				LabelMonitorID: params.MonitorID,
 			},
+			OwnerReferences: c.buildOwnerReferences(),
 		},
 		Spec: corev1.PodSpec{
 			TerminationGracePeriodSeconds: int64Ptr(30),

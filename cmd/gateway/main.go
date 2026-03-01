@@ -70,6 +70,22 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to create k8s client", zap.Error(err))
 	}
+
+	// Resolve owner deployment for ownerReferences on worker pods
+	if cfg.PodName != "" {
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer resolveCancel()
+		ownerRef, err := k8sClient.ResolveOwnerDeployment(resolveCtx, cfg.PodName)
+		if err != nil {
+			log.Warn("failed to resolve owner deployment, worker pods will not have ownerReferences",
+				zap.Error(err))
+		} else {
+			k8sClient.SetOwnerReference(ownerRef)
+			log.Info("owner deployment resolved for worker pod ownerReferences",
+				zap.String("deployment", ownerRef.Name))
+		}
+	}
+
 	webhookSender := webhook.NewSender(cfg.WebhookSigningKey)
 	reconciler := k8s.NewReconciler(k8sClient, repo, webhookSender, cfg.ReconcileWebhookURL, cfg.ReconcileTimeout)
 
