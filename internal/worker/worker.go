@@ -97,6 +97,7 @@ type Worker struct {
 	lastSegmentInfo     *manifest.Segment
 	lastNewSegmentTime  time.Time
 	suspendedAlertSent  bool
+	manifestURLChanged  bool
 
 	// Analysis state
 	blackoutStart      *time.Time
@@ -379,6 +380,9 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 					log.Warn("failed to refresh manifest URL", zap.Error(err))
 				} else {
 					w.mu.Lock()
+					if w.currentManifestURL != newURL {
+						w.manifestURLChanged = true
+					}
 					w.currentManifestURL = newURL
 					w.mu.Unlock()
 				}
@@ -466,6 +470,8 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	}
 	w.mu.Lock()
 	w.lastSegmentInfo = segment
+	isRebaseline := w.manifestURLChanged
+	w.manifestURLChanged = false
 	w.mu.Unlock()
 
 	// Skip if we already processed this segment.
@@ -526,15 +532,21 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	w.lastSegmentSequence = segment.Sequence
 	w.lastSegmentURL = segment.URL
 	w.totalSegments++
-	wasSuspended := w.suspendedAlertSent
-	w.lastNewSegmentTime = time.Now()
-	w.suspendedAlertSent = false
-	w.mu.Unlock()
+	if isRebaseline {
+		// Manifest URL changed — re-baseline segment tracking without
+		// triggering a false stream.resumed or resetting the suspension timer.
+		w.mu.Unlock()
+	} else {
+		wasSuspended := w.suspendedAlertSent
+		w.lastNewSegmentTime = time.Now()
+		w.suspendedAlertSent = false
+		w.mu.Unlock()
 
-	if wasSuspended {
-		w.sendWebhook(ctx, webhook.EventStreamResumed, nil)
-		if w.getState() == StateError {
-			return fmt.Errorf("webhook delivery failed")
+		if wasSuspended {
+			w.sendWebhook(ctx, webhook.EventStreamResumed, nil)
+			if w.getState() == StateError {
+				return fmt.Errorf("webhook delivery failed")
+			}
 		}
 	}
 

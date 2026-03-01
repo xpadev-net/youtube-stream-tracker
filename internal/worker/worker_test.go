@@ -489,6 +489,82 @@ func TestNoFalsePositiveSuspension(t *testing.T) {
 	}
 }
 
+func TestNoFalseResumeOnManifestURLChange(t *testing.T) {
+	cfg := newTestWorkerConfig()
+	// Parser returns sequence 6 with a different URL than what was tracked.
+	parser := &configurableManifestParser{sequence: 6}
+	sender := &captureWebhookSender{}
+	w := NewWorkerWithDeps(cfg, &stubYtDlpClient{}, parser, &stubAnalyzer{}, sender, &spyCallbackClient{})
+
+	// Simulate suspended state: sequence 5 was processed, suspension alert was sent.
+	w.lastSegmentSequence = 5
+	w.lastSegmentURL = "http://old-cdn.example.com/segment.ts"
+	w.currentManifestURL = "https://example.com/manifest.m3u8"
+	w.lastNewSegmentTime = time.Now().Add(-20 * time.Second)
+	w.suspendedAlertSent = true
+	// Simulate that the manifest URL just changed (e.g. yt-dlp refreshed it).
+	w.manifestURLChanged = true
+
+	ctx := context.Background()
+	if err := w.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("analyzeLatestSegment returned error: %v", err)
+	}
+
+	// stream.resumed should NOT have been sent because this was a manifest URL re-baseline.
+	for _, call := range sender.calls {
+		if call.EventType == webhook.EventStreamResumed {
+			t.Fatalf("unexpected stream.resumed webhook during manifest URL re-baseline")
+		}
+	}
+
+	// suspendedAlertSent should still be true (not cleared).
+	if !w.suspendedAlertSent {
+		t.Fatalf("expected suspendedAlertSent to remain true after manifest URL re-baseline")
+	}
+
+	// Segment tracking should have been updated to the new URL.
+	if w.lastSegmentSequence != 6 {
+		t.Fatalf("lastSegmentSequence = %d, want 6", w.lastSegmentSequence)
+	}
+}
+
+func TestGenuineResumeAfterManifestURLChange(t *testing.T) {
+	cfg := newTestWorkerConfig()
+	parser := &configurableManifestParser{sequence: 6}
+	sender := &captureWebhookSender{}
+	w := NewWorkerWithDeps(cfg, &stubYtDlpClient{}, parser, &stubAnalyzer{}, sender, &spyCallbackClient{})
+
+	// Simulate suspended state after a manifest URL re-baseline already happened.
+	w.lastSegmentSequence = 5
+	w.lastSegmentURL = "http://example.com/segment.ts"
+	w.currentManifestURL = "https://example.com/manifest.m3u8"
+	w.lastNewSegmentTime = time.Now().Add(-20 * time.Second)
+	w.suspendedAlertSent = true
+	w.manifestURLChanged = false // re-baseline already cleared
+
+	ctx := context.Background()
+	if err := w.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("analyzeLatestSegment returned error: %v", err)
+	}
+
+	// This time stream.resumed SHOULD have been sent (genuine new segment).
+	var found bool
+	for _, call := range sender.calls {
+		if call.EventType == webhook.EventStreamResumed {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected stream.resumed webhook for genuine resumption, got events: %v", sender.calls)
+	}
+
+	// suspendedAlertSent should be cleared.
+	if w.suspendedAlertSent {
+		t.Fatalf("expected suspendedAlertSent to be false after genuine resumption")
+	}
+}
+
 func TestProcessBlackDetection_ImmediateAlert(t *testing.T) {
 	sender := &captureWebhookSender{}
 	worker := newTestWorkerForDetection(sender)
