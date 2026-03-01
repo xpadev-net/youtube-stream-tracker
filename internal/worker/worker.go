@@ -28,6 +28,10 @@ const (
 	StateError      State = "error"
 )
 
+// suspensionAlertThreshold is the duration without new segments before
+// a stream.suspended alert is fired.
+const suspensionAlertThreshold = 10 * time.Second
+
 // WebhookSender provides webhook delivery.
 type WebhookSender interface {
 	Send(ctx context.Context, url string, payload *webhook.Payload) *webhook.SendResult
@@ -452,7 +456,7 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	if segment.Sequence <= w.lastSegmentSequence {
 		w.mu.Lock()
 		stale := time.Since(w.lastNewSegmentTime)
-		shouldSend := stale >= 10*time.Second && !w.suspendedAlertSent
+		shouldSend := stale >= suspensionAlertThreshold && !w.suspendedAlertSent
 		if shouldSend {
 			w.suspendedAlertSent = true
 		}
