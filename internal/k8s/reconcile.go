@@ -278,7 +278,14 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 				)
 			}
 
-			payloadJSON, _ := json.Marshal(data)
+			payloadJSON, err := json.Marshal(data)
+			if err != nil {
+				log.Warn("failed to marshal reconciliation error webhook payload",
+					zap.String("monitor_id", monitor.ID),
+					zap.Error(err),
+				)
+				return
+			}
 			event := &db.MonitorEvent{
 				MonitorID:        monitor.ID,
 				EventType:        string(webhook.EventMonitorError),
