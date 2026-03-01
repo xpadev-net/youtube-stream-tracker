@@ -394,6 +394,38 @@ func TestProcessSilenceDetection_ImmediateAlert(t *testing.T) {
 	}
 }
 
+func TestProcessSilenceDetection_RecoveryUnchanged(t *testing.T) {
+	sender := &captureWebhookSender{}
+	worker := newTestWorkerForDetection(sender)
+
+	// First: trigger immediate silence alert
+	silentResult := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
+	worker.processSilenceDetection(context.Background(), silentResult, 2.0)
+
+	// Then: recovery (non-silent segment)
+	clearResult := &ffmpeg.SilenceDetectResult{FullySilent: false}
+	worker.processSilenceDetection(context.Background(), clearResult, 2.0)
+
+	if len(sender.calls) != 2 {
+		t.Fatalf("expected 2 webhook calls, got %d", len(sender.calls))
+	}
+	if sender.calls[0].EventType != webhook.EventAlertSilence {
+		t.Fatalf("first event_type = %v, want %v", sender.calls[0].EventType, webhook.EventAlertSilence)
+	}
+	if sender.calls[1].EventType != webhook.EventAlertSilenceRecovered {
+		t.Fatalf("second event_type = %v, want %v", sender.calls[1].EventType, webhook.EventAlertSilenceRecovered)
+	}
+	if worker.silenceAlertSent {
+		t.Fatalf("expected silenceAlertSent to be false after recovery")
+	}
+	if worker.consecutiveSilence != 0 {
+		t.Fatalf("consecutiveSilence = %f, want 0", worker.consecutiveSilence)
+	}
+	if worker.silenceStart != nil {
+		t.Fatalf("expected silenceStart to be nil after recovery")
+	}
+}
+
 func TestProcessBlackDetection_RecoveryUnchanged(t *testing.T) {
 	sender := &captureWebhookSender{}
 	worker := newTestWorkerForDetection(sender)
