@@ -101,6 +101,11 @@ func main() {
 		}
 	}
 
+	// Start pod failure watcher for real-time webhook notifications
+	podWatcher := k8s.NewPodWatcher(k8sClient, repo, webhookSender)
+	watcherCtx, watcherCancel := context.WithCancel(context.Background())
+	go podWatcher.Run(watcherCtx)
+
 	// Start periodic reconciliation if interval is configured
 	var reconcileCancel context.CancelFunc
 	if cfg.ReconcileInterval > 0 {
@@ -174,6 +179,9 @@ func main() {
 	<-quit
 
 	log.Info("shutting down server")
+
+	// Stop pod failure watcher
+	watcherCancel()
 
 	// Stop periodic reconciliation
 	if reconcileCancel != nil {
