@@ -10,18 +10,42 @@ import (
 	"time"
 )
 
+// UnixTime wraps time.Time to support unmarshalling from a Unix timestamp (number)
+// as returned by yt-dlp's release_timestamp field.
+type UnixTime struct {
+	time.Time
+}
+
+// UnmarshalJSON handles both Unix timestamp integers and RFC3339 strings.
+func (u *UnixTime) UnmarshalJSON(data []byte) error {
+	// Try as number (Unix timestamp)
+	var ts float64
+	if err := json.Unmarshal(data, &ts); err == nil {
+		u.Time = time.Unix(int64(ts), 0).UTC()
+		return nil
+	}
+
+	// Fall back to standard time string
+	var t time.Time
+	if err := json.Unmarshal(data, &t); err != nil {
+		return err
+	}
+	u.Time = t
+	return nil
+}
+
 // StreamInfo contains information about a YouTube stream.
 type StreamInfo struct {
-	IsLive          bool       `json:"is_live"`
-	LiveStatus      string     `json:"live_status"` // "is_live", "is_upcoming", "was_live", "not_live"
-	ReleaseTime     *time.Time `json:"release_timestamp,omitempty"`
-	ManifestURL     string     `json:"url,omitempty"`
-	Title           string     `json:"title,omitempty"`
-	ChannelID       string     `json:"channel_id,omitempty"`
-	Duration        *float64   `json:"duration,omitempty"`
-	ViewCount       *int       `json:"view_count,omitempty"`
-	Formats         []Format   `json:"formats,omitempty"`
-	RequestedFormat *Format    `json:"requested_format,omitempty"`
+	IsLive          bool      `json:"is_live"`
+	LiveStatus      string    `json:"live_status"` // "is_live", "is_upcoming", "was_live", "not_live"
+	ReleaseTime     *UnixTime `json:"release_timestamp,omitempty"`
+	ManifestURL     string    `json:"url,omitempty"`
+	Title           string    `json:"title,omitempty"`
+	ChannelID       string    `json:"channel_id,omitempty"`
+	Duration        *float64  `json:"duration,omitempty"`
+	ViewCount       *int      `json:"view_count,omitempty"`
+	Formats         []Format  `json:"formats,omitempty"`
+	RequestedFormat *Format   `json:"requested_format,omitempty"`
 }
 
 // Format represents a video/audio format.
