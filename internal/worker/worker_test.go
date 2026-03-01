@@ -111,9 +111,9 @@ func TestWaitingModeImmediateFirstCheck(t *testing.T) {
 	if worker.getState() != StateMonitoring {
 		t.Fatalf("state = %v, want %v", worker.getState(), StateMonitoring)
 	}
-	// The check should complete well under 2 seconds (stub is instant).
+	// The stub returns instantly, so the check should complete well under 500ms.
 	// If it waited for the 10s ticker, this would fail.
-	if elapsed > 2*time.Second {
+	if elapsed > 500*time.Millisecond {
 		t.Fatalf("waitingMode took %v, expected immediate first check", elapsed)
 	}
 	if len(sender.calls) != 1 {
