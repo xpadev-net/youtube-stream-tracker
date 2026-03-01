@@ -394,6 +394,22 @@ func TestProcessSilenceDetection_ImmediateAlert(t *testing.T) {
 	}
 }
 
+func TestProcessSilenceDetection_NoDuplicateAlert(t *testing.T) {
+	sender := &captureWebhookSender{}
+	worker := newTestWorkerForDetection(sender)
+
+	result := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
+	worker.processSilenceDetection(context.Background(), result, 2.0)
+	worker.processSilenceDetection(context.Background(), result, 2.0)
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("expected 1 webhook call (no duplicate), got %d", len(sender.calls))
+	}
+	if worker.consecutiveSilence != 4.0 {
+		t.Fatalf("consecutiveSilence = %f, want 4.0", worker.consecutiveSilence)
+	}
+}
+
 func TestProcessSilenceDetection_RecoveryUnchanged(t *testing.T) {
 	sender := &captureWebhookSender{}
 	worker := newTestWorkerForDetection(sender)
