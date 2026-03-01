@@ -463,6 +463,9 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 		w.mu.Unlock()
 		if shouldSend {
 			w.sendWebhook(ctx, webhook.EventStreamSuspended, nil)
+			if w.getState() == StateError {
+				return fmt.Errorf("webhook delivery failed")
+			}
 		}
 		return nil
 	}
@@ -511,6 +514,9 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 
 	if wasSuspended {
 		w.sendWebhook(ctx, webhook.EventStreamResumed, nil)
+		if w.getState() == StateError {
+			return fmt.Errorf("webhook delivery failed")
+		}
 	}
 
 	// Process results
