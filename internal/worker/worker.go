@@ -452,12 +452,12 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	if segment.Sequence <= w.lastSegmentSequence {
 		w.mu.Lock()
 		stale := time.Since(w.lastNewSegmentTime)
-		alreadySent := w.suspendedAlertSent
-		w.mu.Unlock()
-		if stale >= 10*time.Second && !alreadySent {
-			w.mu.Lock()
+		shouldSend := stale >= 10*time.Second && !w.suspendedAlertSent
+		if shouldSend {
 			w.suspendedAlertSent = true
-			w.mu.Unlock()
+		}
+		w.mu.Unlock()
+		if shouldSend {
 			w.sendWebhook(ctx, webhook.EventStreamSuspended, nil)
 		}
 		return nil
