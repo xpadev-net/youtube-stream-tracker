@@ -268,8 +268,12 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 			w.mu.Unlock()
 
 			// Send stream started event
+			title := ""
+			if info != nil {
+				title = info.Title
+			}
 			w.sendWebhook(ctx, webhook.EventStreamStarted, map[string]interface{}{
-				"title": info.Title,
+				"title": title,
 			})
 			if w.getState() == StateError {
 				w.reportStatus(ctx, db.StatusError, nil)
