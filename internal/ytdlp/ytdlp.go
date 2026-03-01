@@ -127,7 +127,7 @@ func (c *Client) GetStreamInfo(ctx context.Context, streamURL string) (*StreamIn
 func (c *Client) GetManifestURL(ctx context.Context, streamURL string) (string, error) {
 	args := []string{
 		"--get-url",
-		"--format", "best[protocol^=http]",
+		"--format", "best[protocol^=m3u8]",
 		"--no-playlist",
 		"--no-warnings",
 		"--quiet",
