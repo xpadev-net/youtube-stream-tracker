@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -209,10 +210,22 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 	return result, nil
 }
 
-// sendErrorWebhook sends a monitor.error webhook.
+// sendErrorWebhook sends a monitor.error webhook to both the operator URL
+// and the monitor's registered callback URL, and records the event in the DB.
 func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, reason, message string) {
-	if r.webhookSender == nil || r.reconciliationWebhookURL == "" {
+	if r.webhookSender == nil {
 		return
+	}
+
+	data := map[string]interface{}{
+		"reason":                reason,
+		"reconciliation_action": "mark_as_error_missing_pod",
+		"previous_status":       string(monitor.Status),
+		"observed_state": map[string]interface{}{
+			"pod_exists": false,
+			"db_status":  string(monitor.Status),
+		},
+		"error_details": message,
 	}
 
 	payload := &webhook.Payload{
@@ -220,32 +233,77 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		MonitorID: monitor.ID,
 		StreamURL: monitor.StreamURL,
 		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"reason":                reason,
-			"reconciliation_action": "mark_as_error_missing_pod",
-			"previous_status":       string(monitor.Status),
-			"observed_state": map[string]interface{}{
-				"pod_exists": false,
-				"db_status":  string(monitor.Status),
-			},
-			"error_details": message,
-		},
-		Metadata: monitor.Metadata,
+		Data:      data,
+		Metadata:  monitor.Metadata,
 	}
 
-	// Try to send webhook, but don't block if it fails
-	go func() {
-		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	// Send to operator webhook (fire-and-forget)
+	if r.reconciliationWebhookURL != "" {
+		go func() {
+			sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
 
-		result := r.webhookSender.Send(sendCtx, r.reconciliationWebhookURL, payload)
-		if !result.Success {
-			log.Warn("failed to send error webhook during reconciliation",
-				zap.String("monitor_id", monitor.ID),
-				zap.String("error", result.Error),
-			)
-		}
-	}()
+			result := r.webhookSender.Send(sendCtx, r.reconciliationWebhookURL, payload)
+			if !result.Success {
+				log.Warn("failed to send error webhook during reconciliation",
+					zap.String("monitor_id", monitor.ID),
+					zap.String("error", result.Error),
+				)
+			}
+		}()
+	}
+
+	// Send to monitor's callback URL and record event in DB
+	if monitor.CallbackURL != "" {
+		go func() {
+			sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			result := r.webhookSender.Send(sendCtx, monitor.CallbackURL, payload)
+
+			// Record event in DB for audit trail
+			whStatus := db.WebhookStatusSent
+			var whError *string
+			var sentAt *time.Time
+			if result.Success {
+				now := time.Now()
+				sentAt = &now
+			} else {
+				whStatus = db.WebhookStatusFailed
+				whError = &result.Error
+				log.Warn("failed to send reconciliation error webhook to callback URL",
+					zap.String("monitor_id", monitor.ID),
+					zap.String("callback_url", monitor.CallbackURL),
+					zap.String("error", result.Error),
+				)
+			}
+
+			payloadJSON, err := json.Marshal(data)
+			if err != nil {
+				log.Warn("failed to marshal reconciliation error webhook payload",
+					zap.String("monitor_id", monitor.ID),
+					zap.Error(err),
+				)
+				return
+			}
+			event := &db.MonitorEvent{
+				MonitorID:        monitor.ID,
+				EventType:        string(webhook.EventMonitorError),
+				Payload:          payloadJSON,
+				WebhookStatus:    whStatus,
+				WebhookAttempts:  result.Attempts,
+				WebhookLastError: whError,
+				SentAt:           sentAt,
+			}
+
+			if err := r.repo.CreateEvent(context.Background(), event); err != nil {
+				log.Warn("failed to record reconciliation error webhook event",
+					zap.String("monitor_id", monitor.ID),
+					zap.Error(err),
+				)
+			}
+		}()
+	}
 }
 
 // CreateMonitorPod creates a pod for a monitor and updates the pod_name in DB.
