@@ -1053,6 +1053,121 @@ API Gatewayが再起動した場合、データベース上の監視状態と実
 }
 ```
 
+### 10.5 Worker Pod障害のリアルタイム検出 (Pod Failure Watcher)
+
+Worker Podのプロセスがエラーにより終了した場合（OOMKill、パニック、予期しないクラッシュ等）、Kubernetes Watch APIを使用してリアルタイムに検出し、即座にWebhookで呼び出し元に通知する。
+
+定期的な再整合（セクション10.4）はデフォルト5分間隔であるため、Pod障害の検出に遅延が生じる。本機能により、Pod障害を秒単位で検出・通知することが可能となる。
+
+#### アーキテクチャ
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Pod Failure Watcher                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  [Gateway起動] ──▶ [List Worker Pods]                           │
+│                         │                                        │
+│                  ResourceVersion取得                              │
+│                         │                                        │
+│                         ▼                                        │
+│                  [Watch開始 (Watch API)]                         │
+│                         │                                        │
+│                  ┌──────┴──────┐                                │
+│              Modified      チャネル切断                          │
+│              イベント           │                                │
+│                  │         1秒待機後                              │
+│                  ▼         再接続                                │
+│          [Phase == Failed?]                                      │
+│              │                                                   │
+│         ┌────┴────┐                                             │
+│        Yes        No                                             │
+│         │       (スキップ)                                       │
+│         ▼                                                        │
+│  [DB: モニター取得]                                              │
+│         │                                                        │
+│  [ステータスがアクティブ?]                                       │
+│         │                                                        │
+│    ┌────┴────┐                                                  │
+│   Yes       No                                                   │
+│    │     (スキップ)                                              │
+│    ▼                                                             │
+│  [DB: UpdateStatusWithCondition]                                │
+│  (原子的にerrorに更新)                                          │
+│    │                                                             │
+│    ├──▶ [Webhook送信: monitor.error]                            │
+│    │    (monitor.callback_url宛)                                │
+│    │                                                             │
+│    ├──▶ [DB: イベント記録]                                      │
+│    │                                                             │
+│    └──▶ [失敗Pod削除]                                           │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 検出対象
+
+| 条件 | 検出 | 説明 |
+| ---- | ---- | ---- |
+| Pod Phase = `Failed` | ○ | コンテナのプロセスが非ゼロ終了コードで終了 |
+| OOMKilled | ○ | メモリ制限超過によるKill |
+| パニック/クラッシュ | ○ | 予期しないプロセス終了 |
+| Pod Phase = `Running` | × | 正常動作中のため無視 |
+| Pod Phase = `Succeeded` | × | 正常終了のため無視 |
+
+#### Webhook送信先
+
+Pod障害時のWebhookは、各モニターの `callback_url`（モニター作成時にユーザーが指定したURL）に送信する。これはWorkerプロセス自体が他のイベント（`stream.started`、`alert.blackout`等）を送信するのと同じ宛先である。
+
+#### Webhook Payload Schema (`monitor.error` - Pod障害)
+
+```json
+{
+  "event_type": "monitor.error",
+  "monitor_id": "mon-0190a5c8-e4b0-7d8a-9c1d-2e3f4a5b6c7d",
+  "stream_url": "https://www.youtube.com/watch?v=XXXXXXXXXXX",
+  "timestamp": "2024-01-15T20:15:30+09:00",
+  "data": {
+    "reason": "pod_failure",
+    "exit_code": 137,
+    "message": "Container exceeded memory limit",
+    "termination_reason": "OOMKilled",
+    "pod_name": "stream-monitor-mon-0190a5c8-e4b0-7d8a-9c1d-2e3f4a5b6c7d"
+  },
+  "metadata": {
+    "channel_name": "Example Channel",
+    "stream_title": "配信タイトル"
+  }
+}
+```
+
+#### dataフィールド詳細
+
+| フィールド | 型 | 説明 |
+| ---- | ---- | ---- |
+| `reason` | string | 常に `"pod_failure"` |
+| `exit_code` | int | コンテナの終了コード（137=OOMKill、1=一般エラー等）。取得不可の場合は `-1` |
+| `message` | string | コンテナの終了メッセージ（Kubernetesから取得） |
+| `termination_reason` | string | コンテナの終了理由（`OOMKilled`、`Error`等）。空の場合は省略 |
+| `pod_name` | string | 障害が発生したPod名 |
+
+#### 重複通知の防止
+
+Pod Failure WatcherとReconciliation（セクション10.4）の両方がPod障害を検出する可能性がある。重複通知を防ぐため、以下の仕組みを採用する。
+
+- 両者ともDB更新に `UpdateStatusWithCondition`（CAS的な条件付き更新）を使用する
+- この更新は `UPDATE monitors SET status = 'error' WHERE id = $1 AND status = $2` という形式で、現在のステータスが期待値と一致する場合のみ更新が成功する
+- 先に処理した側の更新が成功し、後から処理した側の更新は「0行更新」となりWebhookはスキップされる
+- これにより、同一の障害に対してWebhookが重複送信されることはない
+
+#### 再接続戦略
+
+| 項目 | 値 |
+| ---- | -- |
+| 再接続待機時間 | 1秒 |
+| 再接続方式 | List（全Pod取得）→ Watch（変更監視）のサイクルを再開 |
+| ResourceVersion | 再接続時はListから新しいResourceVersionを取得して使用 |
+
 ---
 
 ## 11. ログ・メトリクス
@@ -1498,3 +1613,17 @@ spec:
 31. **シーケンス番号追跡**
     - **決定**: シーケンス番号の追跡は行わない（最新セグメントのみを対象）。
     - **理由**: リアルタイム監視において過去セグメントの網羅は不要。
+
+### 2026-03-01: Worker Pod障害リアルタイム通知の追加
+
+32. **Worker Pod障害のリアルタイム検出**
+    - **決定**: Kubernetes Watch APIを使用してWorker Podのステータス変更をリアルタイムに監視し、Pod障害時に即座に `monitor.error` Webhookを `callback_url` 宛に送信する `PodWatcher` コンポーネントをGatewayに追加。
+    - **理由**: 従来の定期Reconciliation（デフォルト5分間隔）ではPod障害検出に遅延が生じるため、秒単位での即時通知を実現する。
+
+33. **Pod障害Webhookの送信先**
+    - **決定**: 各モニターの `callback_url`（モニター作成時に指定されたURL）に送信。Reconciliation用の単一URL（`RECONCILIATION_WEBHOOK_URL`）ではなく、Workerプロセスが他のイベントを送信するのと同じ宛先を使用。
+    - **理由**: 呼び出し元が全てのイベントを同一のエンドポイントで受信できるようにするため。
+
+34. **PodWatcherとReconciliationの重複防止**
+    - **決定**: 両者とも `UpdateStatusWithCondition`（CAS的な条件付きDB更新）を使用し、先に処理した側のみがWebhookを送信する。
+    - **理由**: 同一障害に対するWebhookの重複送信を防止するため。原子的なDB更新により、ロックなしで安全に排他制御が可能。
