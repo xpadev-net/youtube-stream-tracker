@@ -169,6 +169,27 @@ func TestWebhookFailureDeletesJob(t *testing.T) {
 	}
 }
 
+type configurableManifestParser struct {
+	sequence uint64
+}
+
+func (c *configurableManifestParser) GetLatestSegment(ctx context.Context, manifestURL string) (*manifest.Segment, error) {
+	return &manifest.Segment{
+		URL:       "http://example.com/segment.ts",
+		Duration:  1.0,
+		Sequence:  c.sequence,
+		MediaType: "hls",
+	}, nil
+}
+
+func (c *configurableManifestParser) IsEndList(ctx context.Context, manifestURL string) (bool, error) {
+	return false, nil
+}
+
+func (c *configurableManifestParser) FetchSegment(ctx context.Context, segmentURL string) ([]byte, error) {
+	return []byte("data"), nil
+}
+
 type sequenceManifestParser struct {
 	mu       sync.Mutex
 	segments []*manifest.Segment
@@ -325,6 +346,32 @@ func TestGracefulShutdownCompletesAnalysis(t *testing.T) {
 	}
 }
 
+func newTestWorkerConfig() *config.WorkerConfig {
+	return &config.WorkerConfig{
+		MonitorID:                  "mon-test",
+		StreamURL:                  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		CallbackURL:                "http://example.com",
+		InternalAPIKey:             "internal-key",
+		WebhookURL:                 "http://example.com",
+		WebhookSigningKey:          "signing-key",
+		WaitingModeInitialInterval: 1 * time.Millisecond,
+		WaitingModeDelayedInterval: 1 * time.Millisecond,
+		ManifestFetchTimeout:       1 * time.Second,
+		ManifestRefreshInterval:    1 * time.Second,
+		SegmentFetchTimeout:        1 * time.Second,
+		SegmentMaxBytes:            1024,
+		AnalysisInterval:           1 * time.Second,
+		BlackoutThreshold:          1 * time.Second,
+		SilenceThreshold:           1 * time.Second,
+		SilenceDBThreshold:         -50,
+		DelayThreshold:             1 * time.Second,
+		FFmpegPath:                 "ffmpeg",
+		FFprobePath:                "ffprobe",
+		YtDlpPath:                  "yt-dlp",
+		StreamlinkPath:             "streamlink",
+	}
+}
+
 func newTestWorkerForDetection(sender *captureWebhookSender) *Worker {
 	cfg := &config.WorkerConfig{
 		MonitorID:                  "mon-test",
@@ -350,6 +397,96 @@ func newTestWorkerForDetection(sender *captureWebhookSender) *Worker {
 		StreamlinkPath:             "streamlink",
 	}
 	return NewWorkerWithDeps(cfg, &stubYtDlpClient{}, nil, nil, sender, &spyCallbackClient{})
+}
+
+func TestStreamSuspensionAlert(t *testing.T) {
+	cfg := newTestWorkerConfig()
+	parser := &configurableManifestParser{sequence: 5}
+	sender := &captureWebhookSender{}
+	w := NewWorkerWithDeps(cfg, &stubYtDlpClient{}, parser, &stubAnalyzer{}, sender, &spyCallbackClient{})
+
+	// Simulate that sequence 5 was already processed 11 seconds ago.
+	w.lastSegmentSequence = 5
+	w.lastSegmentURL = "http://example.com/segment.ts"
+	w.currentManifestURL = "https://example.com/manifest.m3u8"
+	w.lastNewSegmentTime = time.Now().Add(-11 * time.Second)
+
+	ctx := context.Background()
+	if err := w.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("analyzeLatestSegment returned error: %v", err)
+	}
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("expected 1 webhook call, got %d", len(sender.calls))
+	}
+	if sender.calls[0].EventType != webhook.EventStreamSuspended {
+		t.Fatalf("event_type = %v, want %v", sender.calls[0].EventType, webhook.EventStreamSuspended)
+	}
+
+	// Second call should not send again.
+	if err := w.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("analyzeLatestSegment returned error: %v", err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("expected still 1 webhook call after duplicate, got %d", len(sender.calls))
+	}
+}
+
+func TestStreamResumedAlert(t *testing.T) {
+	cfg := newTestWorkerConfig()
+	parser := &configurableManifestParser{sequence: 6}
+	sender := &captureWebhookSender{}
+	w := NewWorkerWithDeps(cfg, &stubYtDlpClient{}, parser, &stubAnalyzer{}, sender, &spyCallbackClient{})
+
+	// Simulate suspended state: sequence 5 was processed, suspension alert was sent.
+	w.lastSegmentSequence = 5
+	w.currentManifestURL = "https://example.com/manifest.m3u8"
+	w.lastNewSegmentTime = time.Now().Add(-20 * time.Second)
+	w.suspendedAlertSent = true
+
+	ctx := context.Background()
+	if err := w.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("analyzeLatestSegment returned error: %v", err)
+	}
+
+	// Should have received stream.resumed webhook.
+	var found bool
+	for _, call := range sender.calls {
+		if call.EventType == webhook.EventStreamResumed {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected stream.resumed webhook, got events: %v", sender.calls)
+	}
+
+	// suspendedAlertSent should be cleared.
+	if w.suspendedAlertSent {
+		t.Fatalf("expected suspendedAlertSent to be false after recovery")
+	}
+}
+
+func TestNoFalsePositiveSuspension(t *testing.T) {
+	cfg := newTestWorkerConfig()
+	parser := &configurableManifestParser{sequence: 5}
+	sender := &captureWebhookSender{}
+	w := NewWorkerWithDeps(cfg, &stubYtDlpClient{}, parser, &stubAnalyzer{}, sender, &spyCallbackClient{})
+
+	// Same segment but only 5 seconds have passed — should NOT trigger.
+	w.lastSegmentSequence = 5
+	w.lastSegmentURL = "http://example.com/segment.ts"
+	w.currentManifestURL = "https://example.com/manifest.m3u8"
+	w.lastNewSegmentTime = time.Now().Add(-5 * time.Second)
+
+	ctx := context.Background()
+	if err := w.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("analyzeLatestSegment returned error: %v", err)
+	}
+
+	if len(sender.calls) != 0 {
+		t.Fatalf("expected 0 webhook calls, got %d", len(sender.calls))
+	}
 }
 
 func TestProcessBlackDetection_ImmediateAlert(t *testing.T) {

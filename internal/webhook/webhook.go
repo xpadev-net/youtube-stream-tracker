@@ -25,6 +25,8 @@ const (
 	EventStreamStarted          EventType = "stream.started"
 	EventStreamEnded            EventType = "stream.ended"
 	EventStreamDelayed          EventType = "stream.delayed"
+	EventStreamSuspended        EventType = "stream.suspended"
+	EventStreamResumed          EventType = "stream.resumed"
 	EventAlertBlackout          EventType = "alert.blackout"
 	EventAlertBlackoutRecovered EventType = "alert.blackout_recovered"
 	EventAlertSilence           EventType = "alert.silence"
