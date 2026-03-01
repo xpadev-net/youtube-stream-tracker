@@ -5,9 +5,9 @@ go 1.24.0
 toolchain go1.24.12
 
 require (
+	github.com/Eyevinn/hls-m3u8 v0.6.4
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/uuid v1.6.0
-	github.com/grafov/m3u8 v0.12.1
 	github.com/jackc/pgx/v5 v5.8.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/time v0.14.0

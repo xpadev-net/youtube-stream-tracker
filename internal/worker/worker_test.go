@@ -190,6 +190,31 @@ func (c *configurableManifestParser) FetchSegment(ctx context.Context, segmentUR
 	return []byte("data"), nil
 }
 
+type sequenceManifestParser struct {
+	mu       sync.Mutex
+	segments []*manifest.Segment
+	callIdx  int
+}
+
+func (s *sequenceManifestParser) GetLatestSegment(ctx context.Context, manifestURL string) (*manifest.Segment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.callIdx >= len(s.segments) {
+		return s.segments[len(s.segments)-1], nil
+	}
+	seg := s.segments[s.callIdx]
+	s.callIdx++
+	return seg, nil
+}
+
+func (s *sequenceManifestParser) IsEndList(ctx context.Context, manifestURL string) (bool, error) {
+	return false, nil
+}
+
+func (s *sequenceManifestParser) FetchSegment(ctx context.Context, segmentURL string) ([]byte, error) {
+	return []byte("data"), nil
+}
+
 type stubManifestParser struct{}
 
 func (s *stubManifestParser) GetLatestSegment(ctx context.Context, manifestURL string) (*manifest.Segment, error) {
@@ -382,6 +407,7 @@ func TestStreamSuspensionAlert(t *testing.T) {
 
 	// Simulate that sequence 5 was already processed 11 seconds ago.
 	w.lastSegmentSequence = 5
+	w.lastSegmentURL = "http://example.com/segment.ts"
 	w.currentManifestURL = "https://example.com/manifest.m3u8"
 	w.lastNewSegmentTime = time.Now().Add(-11 * time.Second)
 
@@ -449,6 +475,7 @@ func TestNoFalsePositiveSuspension(t *testing.T) {
 
 	// Same segment but only 5 seconds have passed — should NOT trigger.
 	w.lastSegmentSequence = 5
+	w.lastSegmentURL = "http://example.com/segment.ts"
 	w.currentManifestURL = "https://example.com/manifest.m3u8"
 	w.lastNewSegmentTime = time.Now().Add(-5 * time.Second)
 
@@ -606,5 +633,125 @@ func TestProcessBlackDetection_RecoveryUnchanged(t *testing.T) {
 	}
 	if worker.blackoutStart != nil {
 		t.Fatalf("expected blackoutStart to be nil after recovery")
+	}
+}
+
+func TestAnalyzeLatestSegment_SameSequenceDifferentURL(t *testing.T) {
+	// When EXT-X-MEDIA-SEQUENCE is absent, successive polls may return
+	// the same Sequence but a different URL (sliding window). The worker
+	// should still process the new segment.
+	parser := &sequenceManifestParser{
+		segments: []*manifest.Segment{
+			{URL: "http://example.com/segA.ts", Duration: 2.0, Sequence: 2, MediaType: "hls"},
+			{URL: "http://example.com/segB.ts", Duration: 2.0, Sequence: 2, MediaType: "hls"},
+		},
+	}
+	analyzer := &stubAnalyzer{}
+	sender := &captureWebhookSender{}
+	spyCallback := &spyCallbackClient{}
+	cfg := &config.WorkerConfig{
+		MonitorID:                  "mon-dedup",
+		StreamURL:                  "https://www.youtube.com/watch?v=test",
+		CallbackURL:                "http://example.com",
+		InternalAPIKey:             "internal-key",
+		WebhookURL:                 "http://example.com",
+		WebhookSigningKey:          "signing-key",
+		WaitingModeInitialInterval: 1 * time.Millisecond,
+		WaitingModeDelayedInterval: 1 * time.Millisecond,
+		ManifestFetchTimeout:       1 * time.Second,
+		ManifestRefreshInterval:    1 * time.Second,
+		SegmentFetchTimeout:        1 * time.Second,
+		SegmentMaxBytes:            1024,
+		AnalysisInterval:           1 * time.Second,
+		BlackoutThreshold:          30 * time.Second,
+		SilenceThreshold:           30 * time.Second,
+		SilenceDBThreshold:         -50,
+		DelayThreshold:             1 * time.Second,
+		FFmpegPath:                 "ffmpeg",
+		FFprobePath:                "ffprobe",
+		YtDlpPath:                  "yt-dlp",
+		StreamlinkPath:             "streamlink",
+	}
+	worker := NewWorkerWithDeps(cfg, &stubYtDlpClient{}, parser, analyzer, sender, spyCallback)
+	worker.currentManifestURL = "http://example.com/playlist.m3u8"
+
+	ctx := context.Background()
+
+	// First call: processes segA (sequence=2)
+	if err := worker.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("first analyzeLatestSegment error: %v", err)
+	}
+	if worker.totalSegments != 1 {
+		t.Fatalf("totalSegments after first call = %d, want 1", worker.totalSegments)
+	}
+	if worker.lastSegmentURL != "http://example.com/segA.ts" {
+		t.Fatalf("lastSegmentURL = %s, want segA.ts", worker.lastSegmentURL)
+	}
+
+	// Second call: same sequence=2, different URL → should still process
+	if err := worker.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("second analyzeLatestSegment error: %v", err)
+	}
+	if worker.totalSegments != 2 {
+		t.Fatalf("totalSegments after second call = %d, want 2", worker.totalSegments)
+	}
+	if worker.lastSegmentURL != "http://example.com/segB.ts" {
+		t.Fatalf("lastSegmentURL = %s, want segB.ts", worker.lastSegmentURL)
+	}
+}
+
+func TestAnalyzeLatestSegment_SameSequenceSameURL(t *testing.T) {
+	// Same sequence and same URL should be skipped (normal dedup behavior).
+	parser := &sequenceManifestParser{
+		segments: []*manifest.Segment{
+			{URL: "http://example.com/segA.ts", Duration: 2.0, Sequence: 2, MediaType: "hls"},
+			{URL: "http://example.com/segA.ts", Duration: 2.0, Sequence: 2, MediaType: "hls"},
+		},
+	}
+	analyzer := &stubAnalyzer{}
+	sender := &captureWebhookSender{}
+	spyCallback := &spyCallbackClient{}
+	cfg := &config.WorkerConfig{
+		MonitorID:                  "mon-dedup2",
+		StreamURL:                  "https://www.youtube.com/watch?v=test",
+		CallbackURL:                "http://example.com",
+		InternalAPIKey:             "internal-key",
+		WebhookURL:                 "http://example.com",
+		WebhookSigningKey:          "signing-key",
+		WaitingModeInitialInterval: 1 * time.Millisecond,
+		WaitingModeDelayedInterval: 1 * time.Millisecond,
+		ManifestFetchTimeout:       1 * time.Second,
+		ManifestRefreshInterval:    1 * time.Second,
+		SegmentFetchTimeout:        1 * time.Second,
+		SegmentMaxBytes:            1024,
+		AnalysisInterval:           1 * time.Second,
+		BlackoutThreshold:          30 * time.Second,
+		SilenceThreshold:           30 * time.Second,
+		SilenceDBThreshold:         -50,
+		DelayThreshold:             1 * time.Second,
+		FFmpegPath:                 "ffmpeg",
+		FFprobePath:                "ffprobe",
+		YtDlpPath:                  "yt-dlp",
+		StreamlinkPath:             "streamlink",
+	}
+	worker := NewWorkerWithDeps(cfg, &stubYtDlpClient{}, parser, analyzer, sender, spyCallback)
+	worker.currentManifestURL = "http://example.com/playlist.m3u8"
+
+	ctx := context.Background()
+
+	// First call: processes segA
+	if err := worker.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("first analyzeLatestSegment error: %v", err)
+	}
+	if worker.totalSegments != 1 {
+		t.Fatalf("totalSegments after first call = %d, want 1", worker.totalSegments)
+	}
+
+	// Second call: same sequence, same URL → should be skipped
+	if err := worker.analyzeLatestSegment(ctx); err != nil {
+		t.Fatalf("second analyzeLatestSegment error: %v", err)
+	}
+	if worker.totalSegments != 1 {
+		t.Fatalf("totalSegments after second call = %d, want 1 (should be skipped)", worker.totalSegments)
 	}
 }

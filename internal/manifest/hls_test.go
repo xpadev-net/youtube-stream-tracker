@@ -212,3 +212,39 @@ func TestGetLatestSegmentHLSRelativeURL(t *testing.T) {
 		t.Fatalf("segment sequence = %d, want 1", segment.Sequence)
 	}
 }
+
+func TestGetLatestSegmentHLSNoMediaSequence(t *testing.T) {
+	// When EXT-X-MEDIA-SEQUENCE is absent, SeqNo defaults to 0.
+	// Sequence should equal the 0-based index of the last segment.
+	m3u8 := `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:10
+#EXTINF:10.0,
+segA.ts
+#EXTINF:10.0,
+segB.ts
+#EXTINF:10.0,
+segC.ts
+`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(m3u8))
+	}))
+	defer server.Close()
+
+	parser := newTestParser()
+
+	segment, err := parser.GetLatestSegment(context.Background(), server.URL+"/playlist.m3u8")
+	if err != nil {
+		t.Fatalf("GetLatestSegment error: %v", err)
+	}
+	expectedURL := server.URL + "/segC.ts"
+	if segment.URL != expectedURL {
+		t.Fatalf("segment URL = %s, want %s", segment.URL, expectedURL)
+	}
+	// Sequence = 0 (default SeqNo) + 2 (last index) = 2
+	if segment.Sequence != 2 {
+		t.Fatalf("segment sequence = %d, want 2", segment.Sequence)
+	}
+}

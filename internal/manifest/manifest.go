@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/grafov/m3u8"
+	"github.com/Eyevinn/hls-m3u8/m3u8"
 
 	"github.com/xpadev-net/youtube-stream-tracker/internal/validation"
 )

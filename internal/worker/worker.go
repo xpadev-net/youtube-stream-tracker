@@ -90,6 +90,7 @@ type Worker struct {
 	streamStatus        db.StreamStatus
 	currentManifestURL  string
 	lastSegmentSequence uint64
+	lastSegmentURL      string
 	segmentErrorStart   *time.Time
 	segmentErrorSent    bool
 	lastLiveCheck       time.Time
@@ -417,6 +418,21 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 	}
 }
 
+// checkSuspension sends a stream.suspended webhook when no new segments
+// have appeared for longer than suspensionAlertThreshold.
+func (w *Worker) checkSuspension(ctx context.Context) {
+	w.mu.Lock()
+	stale := time.Since(w.lastNewSegmentTime)
+	shouldSend := stale >= suspensionAlertThreshold && !w.suspendedAlertSent
+	if shouldSend {
+		w.suspendedAlertSent = true
+	}
+	w.mu.Unlock()
+	if shouldSend {
+		w.sendWebhook(ctx, webhook.EventStreamSuspended, nil)
+	}
+}
+
 // analyzeLatestSegment fetches and analyzes the latest segment.
 func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	w.mu.Lock()
@@ -452,20 +468,22 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	w.lastSegmentInfo = segment
 	w.mu.Unlock()
 
-	// Skip if we already processed this segment
-	if segment.Sequence <= w.lastSegmentSequence {
-		w.mu.Lock()
-		stale := time.Since(w.lastNewSegmentTime)
-		shouldSend := stale >= suspensionAlertThreshold && !w.suspendedAlertSent
-		if shouldSend {
-			w.suspendedAlertSent = true
+	// Skip if we already processed this segment.
+	// When EXT-X-MEDIA-SEQUENCE is absent, SeqNo defaults to 0 and the
+	// calculated Sequence may stay constant across polls even as the
+	// playlist slides forward. Fall back to URL comparison so that a
+	// segment with the same Sequence but a different URL is still processed.
+	if segment.Sequence < w.lastSegmentSequence {
+		w.checkSuspension(ctx)
+		if w.getState() == StateError {
+			return fmt.Errorf("webhook delivery failed")
 		}
-		w.mu.Unlock()
-		if shouldSend {
-			w.sendWebhook(ctx, webhook.EventStreamSuspended, nil)
-			if w.getState() == StateError {
-				return fmt.Errorf("webhook delivery failed")
-			}
+		return nil
+	}
+	if segment.Sequence == w.lastSegmentSequence && segment.URL == w.lastSegmentURL {
+		w.checkSuspension(ctx)
+		if w.getState() == StateError {
+			return fmt.Errorf("webhook delivery failed")
 		}
 		return nil
 	}
@@ -506,6 +524,7 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	// Update state
 	w.mu.Lock()
 	w.lastSegmentSequence = segment.Sequence
+	w.lastSegmentURL = segment.URL
 	w.totalSegments++
 	wasSuspended := w.suspendedAlertSent
 	w.lastNewSegmentTime = time.Now()
