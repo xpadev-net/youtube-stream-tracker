@@ -86,6 +86,7 @@ type Worker struct {
 	streamStatus        db.StreamStatus
 	currentManifestURL  string
 	lastSegmentSequence uint64
+	lastSegmentURL      string
 	segmentErrorStart   *time.Time
 	segmentErrorSent    bool
 	lastLiveCheck       time.Time
@@ -442,8 +443,15 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	w.lastSegmentInfo = segment
 	w.mu.Unlock()
 
-	// Skip if we already processed this segment
-	if segment.Sequence <= w.lastSegmentSequence {
+	// Skip if we already processed this segment.
+	// When EXT-X-MEDIA-SEQUENCE is absent, SeqNo defaults to 0 and the
+	// calculated Sequence may stay constant across polls even as the
+	// playlist slides forward. Fall back to URL comparison so that a
+	// segment with the same Sequence but a different URL is still processed.
+	if segment.Sequence < w.lastSegmentSequence {
+		return nil
+	}
+	if segment.Sequence == w.lastSegmentSequence && segment.URL == w.lastSegmentURL {
 		return nil
 	}
 
@@ -483,6 +491,7 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	// Update state
 	w.mu.Lock()
 	w.lastSegmentSequence = segment.Sequence
+	w.lastSegmentURL = segment.URL
 	w.totalSegments++
 	w.mu.Unlock()
 
