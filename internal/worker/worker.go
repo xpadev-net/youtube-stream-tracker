@@ -511,7 +511,7 @@ func (w *Worker) processBlackDetection(ctx context.Context, result *ffmpeg.Black
 			now := time.Now()
 			w.blackoutStart = &now
 		}
-		if !w.blackoutAlertSent && w.consecutiveBlack >= w.cfg.BlackoutThreshold.Seconds() {
+		if !w.blackoutAlertSent {
 			w.blackoutEvents++
 			w.blackoutAlertSent = true
 			startTime := *w.blackoutStart
@@ -569,7 +569,7 @@ func (w *Worker) processSilenceDetection(ctx context.Context, result *ffmpeg.Sil
 			w.silenceStart = &now
 		}
 
-		if !w.silenceAlertSent && w.consecutiveSilence >= w.cfg.SilenceThreshold.Seconds() {
+		if !w.silenceAlertSent {
 			w.silenceEvents++
 			w.silenceAlertSent = true
 			startTime := *w.silenceStart
