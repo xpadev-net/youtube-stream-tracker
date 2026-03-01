@@ -29,6 +29,8 @@ const (
 	EventAlertBlackoutRecovered EventType = "alert.blackout_recovered"
 	EventAlertSilence           EventType = "alert.silence"
 	EventAlertSilenceRecovered  EventType = "alert.silence_recovered"
+	EventStreamSuspended        EventType = "stream.suspended"
+	EventStreamResumed          EventType = "stream.resumed"
 	EventAlertSegmentError      EventType = "alert.segment_error"
 	EventMonitorError           EventType = "monitor.error"
 )

@@ -90,6 +90,8 @@ type Worker struct {
 	segmentErrorSent    bool
 	lastLiveCheck       time.Time
 	lastSegmentInfo     *manifest.Segment
+	lastNewSegmentTime  time.Time
+	suspendedAlertSent  bool
 
 	// Analysis state
 	blackoutStart      *time.Time
@@ -339,6 +341,10 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 
 	log.Info("got manifest URL", zap.String("url", manifestURL))
 
+	w.mu.Lock()
+	w.lastNewSegmentTime = time.Now()
+	w.mu.Unlock()
+
 	manifestRefreshTicker := time.NewTicker(w.cfg.ManifestRefreshInterval)
 	defer manifestRefreshTicker.Stop()
 
@@ -444,6 +450,16 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 
 	// Skip if we already processed this segment
 	if segment.Sequence <= w.lastSegmentSequence {
+		w.mu.Lock()
+		stale := time.Since(w.lastNewSegmentTime)
+		alreadySent := w.suspendedAlertSent
+		w.mu.Unlock()
+		if stale >= 10*time.Second && !alreadySent {
+			w.mu.Lock()
+			w.suspendedAlertSent = true
+			w.mu.Unlock()
+			w.sendWebhook(ctx, webhook.EventStreamSuspended, nil)
+		}
 		return nil
 	}
 
@@ -484,7 +500,14 @@ func (w *Worker) analyzeLatestSegment(ctx context.Context) error {
 	w.mu.Lock()
 	w.lastSegmentSequence = segment.Sequence
 	w.totalSegments++
+	wasSuspended := w.suspendedAlertSent
+	w.lastNewSegmentTime = time.Now()
+	w.suspendedAlertSent = false
 	w.mu.Unlock()
+
+	if wasSuspended {
+		w.sendWebhook(ctx, webhook.EventStreamResumed, nil)
+	}
 
 	// Process results
 	w.processBlackDetection(ctx, result.Black, segment.Duration)
