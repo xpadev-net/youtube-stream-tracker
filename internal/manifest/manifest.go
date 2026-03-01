@@ -104,8 +104,8 @@ func (p *Parser) getLatestHLSSegment(ctx context.Context, manifestURL string) (*
 			return nil, fmt.Errorf("no variants in master playlist")
 		}
 
-		// Pick the first variant (or could pick by bandwidth)
-		variant := masterpl.Variants[0]
+		// Pick the lowest bandwidth variant to reduce processing load
+		variant := lowestBandwidthVariant(masterpl.Variants)
 		mediaURL, err := resolveURL(baseURL, variant.URI)
 		if err != nil {
 			return nil, fmt.Errorf("resolve variant URL: %w", err)
@@ -195,7 +195,7 @@ func (p *Parser) isEndListWithDepth(ctx context.Context, manifestURL string, dep
 		if err != nil {
 			return false, fmt.Errorf("parse manifest URL: %w", err)
 		}
-		variant := masterpl.Variants[0]
+		variant := lowestBandwidthVariant(masterpl.Variants)
 		mediaURL, err := resolveURL(baseURL, variant.URI)
 		if err != nil {
 			return false, fmt.Errorf("resolve variant URL: %w", err)
@@ -362,7 +362,7 @@ func selectSegmentTemplate(mpd *dashMPD) (*dashSegmentTemplate, *dashRepresentat
 			if rep.SegmentTemplate == nil {
 				continue
 			}
-			if chosen == nil || rep.Bandwidth > chosen.Bandwidth {
+			if chosen == nil || rep.Bandwidth < chosen.Bandwidth {
 				chosen = rep
 			}
 		}
@@ -590,6 +590,17 @@ func parseMPDDuration(mpd *dashMPD) (float64, error) {
 		return 0, fmt.Errorf("parsed duration is zero or negative")
 	}
 	return total, nil
+}
+
+// lowestBandwidthVariant returns the variant with the lowest bandwidth.
+func lowestBandwidthVariant(variants []*m3u8.Variant) *m3u8.Variant {
+	lowest := variants[0]
+	for _, v := range variants[1:] {
+		if v.Bandwidth < lowest.Bandwidth {
+			lowest = v
+		}
+	}
+	return lowest
 }
 
 func isDASHManifestURL(manifestURL string) bool {
