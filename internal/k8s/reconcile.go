@@ -297,12 +297,13 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 	auditCtx, auditCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
 	defer auditCancel()
 
+	eventPersisted := true
 	if err := r.repo.CreateEvent(auditCtx, event); err != nil {
 		log.Warn("failed to record reconciliation error event",
 			zap.String("monitor_id", monitor.ID),
 			zap.Error(err),
 		)
-		return
+		eventPersisted = false
 	}
 
 	if !willSendCallback {
@@ -330,6 +331,10 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 				zap.String("callback_url", redactURL(monitor.CallbackURL)),
 				zap.String("error", result.Error),
 			)
+		}
+
+		if !eventPersisted {
+			return
 		}
 
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
