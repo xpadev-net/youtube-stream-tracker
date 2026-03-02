@@ -291,8 +291,6 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		} else {
 			// No callback URL — nothing to deliver
 			event.WebhookStatus = db.WebhookStatusSent
-			now := time.Now()
-			event.SentAt = &now
 		}
 	}
 
