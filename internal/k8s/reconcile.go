@@ -280,6 +280,7 @@ func (r *Reconciler) sendErrorWebhook(monitor *db.Monitor, reason, message strin
 		EventType:     string(webhook.EventMonitorError),
 		Payload:       payloadJSON,
 		WebhookStatus: db.WebhookStatusPending,
+		CreatedAt:     time.Now(),
 	}
 
 	if !willSendCallback {
@@ -341,13 +342,13 @@ func (r *Reconciler) sendErrorWebhook(monitor *db.Monitor, reason, message strin
 			event.WebhookLastError = whError
 			event.SentAt = sentAt
 			retryCtx, retryCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
-			defer retryCancel()
 			if err := r.repo.UpsertEvent(retryCtx, event); err != nil {
 				log.Warn("retry: failed to upsert reconciliation error event",
 					zap.String("monitor_id", monitor.ID),
 					zap.Error(err),
 				)
 			}
+			retryCancel()
 			return
 		}
 

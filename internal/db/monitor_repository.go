@@ -382,11 +382,14 @@ func (r *MonitorRepository) CreateEvent(ctx context.Context, event *MonitorEvent
 	if event.ID == uuid.Nil {
 		event.ID = uuid.Must(uuid.NewV7())
 	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now()
+	}
 
 	_, err := r.db.pool.Exec(ctx, `
 		INSERT INTO monitor_events (id, monitor_id, event_type, payload, webhook_status, webhook_attempts, webhook_last_error, created_at, sent_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, event.ID, event.MonitorID, event.EventType, event.Payload, event.WebhookStatus, event.WebhookAttempts, event.WebhookLastError, time.Now(), event.SentAt)
+	`, event.ID, event.MonitorID, event.EventType, event.Payload, event.WebhookStatus, event.WebhookAttempts, event.WebhookLastError, event.CreatedAt, event.SentAt)
 	if err != nil {
 		return fmt.Errorf("insert monitor_event: %w", err)
 	}
@@ -414,6 +417,9 @@ func (r *MonitorRepository) UpsertEvent(ctx context.Context, event *MonitorEvent
 	if event.ID == uuid.Nil {
 		event.ID = uuid.Must(uuid.NewV7())
 	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now()
+	}
 
 	_, err := r.db.pool.Exec(ctx, `
 		INSERT INTO monitor_events (id, monitor_id, event_type, payload, webhook_status, webhook_attempts, webhook_last_error, created_at, sent_at)
@@ -423,7 +429,7 @@ func (r *MonitorRepository) UpsertEvent(ctx context.Context, event *MonitorEvent
 			webhook_attempts = EXCLUDED.webhook_attempts,
 			webhook_last_error = EXCLUDED.webhook_last_error,
 			sent_at = EXCLUDED.sent_at
-	`, event.ID, event.MonitorID, event.EventType, event.Payload, event.WebhookStatus, event.WebhookAttempts, event.WebhookLastError, time.Now(), event.SentAt)
+	`, event.ID, event.MonitorID, event.EventType, event.Payload, event.WebhookStatus, event.WebhookAttempts, event.WebhookLastError, event.CreatedAt, event.SentAt)
 	if err != nil {
 		return fmt.Errorf("upsert monitor_event: %w", err)
 	}
