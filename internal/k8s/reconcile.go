@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"time"
 
 	"go.uber.org/zap"
@@ -12,6 +13,20 @@ import (
 	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/webhook"
 )
+
+const auditWriteTimeout = 10 * time.Second
+
+// redactURL returns scheme://host/path, stripping query params, fragments, and userinfo.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<invalid-url>"
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.User = nil
+	return u.String()
+}
 
 // ReconcileResult contains the result of a reconciliation.
 type ReconcileResult struct {
@@ -265,14 +280,23 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		WebhookStatus: db.WebhookStatusPending,
 	}
 
-	if r.webhookSender == nil || monitor.CallbackURL == "" {
-		// No webhook sender or no callback URL — nothing to deliver
+	switch {
+	case monitor.CallbackURL == "":
+		// No callback URL — nothing to deliver
 		event.WebhookStatus = db.WebhookStatusSent
 		now := time.Now()
 		event.SentAt = &now
+	case r.webhookSender == nil:
+		// Callback URL exists but no sender configured — record as failed
+		event.WebhookStatus = db.WebhookStatusFailed
+		errMsg := "no webhook sender available"
+		event.WebhookLastError = &errMsg
 	}
 
-	if err := r.repo.CreateEvent(context.Background(), event); err != nil {
+	auditCtx, auditCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
+	defer auditCancel()
+
+	if err := r.repo.CreateEvent(auditCtx, event); err != nil {
 		log.Warn("failed to record reconciliation error event",
 			zap.String("monitor_id", monitor.ID),
 			zap.Error(err),
@@ -302,12 +326,15 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 			whError = &result.Error
 			log.Warn("failed to send reconciliation error webhook to callback URL",
 				zap.String("monitor_id", monitor.ID),
-				zap.String("callback_url", monitor.CallbackURL),
+				zap.String("callback_url", redactURL(monitor.CallbackURL)),
 				zap.String("error", result.Error),
 			)
 		}
 
-		if err := r.repo.UpdateEventWebhookStatus(context.Background(), event.ID, whStatus, result.Attempts, whError, sentAt); err != nil {
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
+		defer updateCancel()
+
+		if err := r.repo.UpdateEventWebhookStatus(updateCtx, event.ID, whStatus, result.Attempts, whError, sentAt); err != nil {
 			log.Warn("failed to update reconciliation error event status",
 				zap.String("monitor_id", monitor.ID),
 				zap.Error(err),
