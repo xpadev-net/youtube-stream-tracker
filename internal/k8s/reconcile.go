@@ -168,7 +168,7 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 
 			if updated {
 				// Send monitor.error webhook
-				r.sendErrorWebhook(reconcileCtx, monitor, "reconciliation_mismatch", "Pod not found during reconciliation")
+				r.sendErrorWebhook(monitor, "reconciliation_mismatch", "Pod not found during reconciliation")
 			}
 		}
 	}
@@ -227,7 +227,7 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 
 // sendErrorWebhook sends a monitor.error webhook to both the operator URL
 // and the monitor's registered callback URL, and records the event in the DB.
-func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, reason, message string) {
+func (r *Reconciler) sendErrorWebhook(monitor *db.Monitor, reason, message string) {
 	data := map[string]interface{}{
 		"reason":                reason,
 		"reconciliation_action": "mark_as_error_missing_pod",
@@ -334,15 +334,16 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		}
 
 		if !eventPersisted {
-			// Initial CreateEvent failed; retry with final status so the audit trail is not lost.
+			// Initial CreateEvent failed; retry with upsert to handle ambiguous timeouts
+			// where the row may have been committed despite the error.
 			event.WebhookStatus = whStatus
 			event.WebhookAttempts = result.Attempts
 			event.WebhookLastError = whError
 			event.SentAt = sentAt
 			retryCtx, retryCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
 			defer retryCancel()
-			if err := r.repo.CreateEvent(retryCtx, event); err != nil {
-				log.Warn("retry: failed to record reconciliation error event",
+			if err := r.repo.UpsertEvent(retryCtx, event); err != nil {
+				log.Warn("retry: failed to upsert reconciliation error event",
 					zap.String("monitor_id", monitor.ID),
 					zap.Error(err),
 				)

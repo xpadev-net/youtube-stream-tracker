@@ -408,6 +408,29 @@ func (r *MonitorRepository) UpdateEventWebhookStatus(ctx context.Context, eventI
 	return nil
 }
 
+// UpsertEvent inserts a monitor event or updates it if it already exists.
+// Used when a previous CreateEvent may have committed despite returning an error (e.g., context timeout).
+func (r *MonitorRepository) UpsertEvent(ctx context.Context, event *MonitorEvent) error {
+	if event.ID == uuid.Nil {
+		event.ID = uuid.Must(uuid.NewV7())
+	}
+
+	_, err := r.db.pool.Exec(ctx, `
+		INSERT INTO monitor_events (id, monitor_id, event_type, payload, webhook_status, webhook_attempts, webhook_last_error, created_at, sent_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (id) DO UPDATE SET
+			webhook_status = EXCLUDED.webhook_status,
+			webhook_attempts = EXCLUDED.webhook_attempts,
+			webhook_last_error = EXCLUDED.webhook_last_error,
+			sent_at = EXCLUDED.sent_at
+	`, event.ID, event.MonitorID, event.EventType, event.Payload, event.WebhookStatus, event.WebhookAttempts, event.WebhookLastError, time.Now(), event.SentAt)
+	if err != nil {
+		return fmt.Errorf("upsert monitor_event: %w", err)
+	}
+
+	return nil
+}
+
 // GetPendingEvents retrieves events with pending webhook status.
 func (r *MonitorRepository) GetPendingEvents(ctx context.Context, limit int) ([]*MonitorEvent, error) {
 	rows, err := r.db.pool.Query(ctx, `
