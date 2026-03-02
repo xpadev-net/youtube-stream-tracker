@@ -290,7 +290,7 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 			event.WebhookLastError = &errMsg
 		} else {
 			// No callback URL — nothing to deliver
-			event.WebhookStatus = db.WebhookStatusSent
+			event.WebhookStatus = db.WebhookStatusSkipped
 		}
 	}
 
