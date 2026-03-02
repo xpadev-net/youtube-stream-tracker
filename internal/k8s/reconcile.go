@@ -253,57 +253,71 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		}()
 	}
 
-	// Send to monitor's callback URL and record event in DB
-	if monitor.CallbackURL != "" {
-		go func() {
-			sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			result := r.webhookSender.Send(sendCtx, monitor.CallbackURL, payload)
-
-			// Record event in DB for audit trail
-			whStatus := db.WebhookStatusSent
-			var whError *string
-			var sentAt *time.Time
-			if result.Success {
-				now := time.Now()
-				sentAt = &now
-			} else {
-				whStatus = db.WebhookStatusFailed
-				whError = &result.Error
-				log.Warn("failed to send reconciliation error webhook to callback URL",
-					zap.String("monitor_id", monitor.ID),
-					zap.String("callback_url", monitor.CallbackURL),
-					zap.String("error", result.Error),
-				)
-			}
-
-			payloadJSON, err := json.Marshal(data)
-			if err != nil {
-				log.Warn("failed to marshal reconciliation error webhook payload",
-					zap.String("monitor_id", monitor.ID),
-					zap.Error(err),
-				)
-				return
-			}
-			event := &db.MonitorEvent{
-				MonitorID:        monitor.ID,
-				EventType:        string(webhook.EventMonitorError),
-				Payload:          payloadJSON,
-				WebhookStatus:    whStatus,
-				WebhookAttempts:  result.Attempts,
-				WebhookLastError: whError,
-				SentAt:           sentAt,
-			}
-
-			if err := r.repo.CreateEvent(context.Background(), event); err != nil {
-				log.Warn("failed to record reconciliation error webhook event",
-					zap.String("monitor_id", monitor.ID),
-					zap.Error(err),
-				)
-			}
-		}()
+	// Record event in DB for audit trail (regardless of callback URL)
+	payloadJSON, err := json.Marshal(data)
+	if err != nil {
+		log.Warn("failed to marshal reconciliation error webhook payload",
+			zap.String("monitor_id", monitor.ID),
+			zap.Error(err),
+		)
+		return
 	}
+
+	event := &db.MonitorEvent{
+		MonitorID:     monitor.ID,
+		EventType:     string(webhook.EventMonitorError),
+		Payload:       payloadJSON,
+		WebhookStatus: db.WebhookStatusPending,
+	}
+
+	if monitor.CallbackURL == "" {
+		// No callback URL — nothing to deliver
+		event.WebhookStatus = db.WebhookStatusSent
+		now := time.Now()
+		event.SentAt = &now
+	}
+
+	if err := r.repo.CreateEvent(ctx, event); err != nil {
+		log.Warn("failed to record reconciliation error event",
+			zap.String("monitor_id", monitor.ID),
+			zap.Error(err),
+		)
+	}
+
+	if monitor.CallbackURL == "" {
+		return
+	}
+
+	// Send webhook and update event status
+	go func() {
+		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		result := r.webhookSender.Send(sendCtx, monitor.CallbackURL, payload)
+
+		whStatus := db.WebhookStatusSent
+		var whError *string
+		var sentAt *time.Time
+		if result.Success {
+			now := time.Now()
+			sentAt = &now
+		} else {
+			whStatus = db.WebhookStatusFailed
+			whError = &result.Error
+			log.Warn("failed to send reconciliation error webhook to callback URL",
+				zap.String("monitor_id", monitor.ID),
+				zap.String("callback_url", monitor.CallbackURL),
+				zap.String("error", result.Error),
+			)
+		}
+
+		if err := r.repo.UpdateEventWebhookStatus(context.Background(), event.ID, whStatus, result.Attempts, whError, sentAt); err != nil {
+			log.Warn("failed to update reconciliation error event status",
+				zap.String("monitor_id", monitor.ID),
+				zap.Error(err),
+			)
+		}
+	}()
 }
 
 // CreateMonitorPod creates a pod for a monitor and updates the pod_name in DB.
