@@ -66,6 +66,64 @@ func (s *spyCallbackClient) ReportWebhookEvent(ctx context.Context, monitorID st
 	return nil
 }
 
+func TestWaitingModeImmediateFirstCheck(t *testing.T) {
+	cfg := &config.WorkerConfig{
+		MonitorID:                  "mon-test",
+		StreamURL:                  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		CallbackURL:                "http://example.com",
+		InternalAPIKey:             "internal-key",
+		WebhookURL:                 "http://example.com",
+		WebhookSigningKey:          "signing-key",
+		WaitingModeInitialInterval: 10 * time.Second,
+		WaitingModeDelayedInterval: 10 * time.Second,
+		ManifestFetchTimeout:       1 * time.Second,
+		ManifestRefreshInterval:    1 * time.Second,
+		SegmentFetchTimeout:        1 * time.Second,
+		SegmentMaxBytes:            1024,
+		AnalysisInterval:           1 * time.Second,
+		BlackoutThreshold:          1 * time.Second,
+		SilenceThreshold:           1 * time.Second,
+		SilenceDBThreshold:         -50,
+		DelayThreshold:             1 * time.Second,
+		FFmpegPath:                 "ffmpeg",
+		FFprobePath:                "ffprobe",
+		YtDlpPath:                  "yt-dlp",
+		StreamlinkPath:             "streamlink",
+	}
+
+	ytdlpClient := &stubYtDlpClient{
+		isLive: true,
+		info:   &ytdlp.StreamInfo{Title: "Test Stream", LiveStatus: "is_live", IsLive: true},
+	}
+	sender := &captureWebhookSender{}
+	worker := NewWorkerWithDeps(cfg, ytdlpClient, nil, nil, sender, &spyCallbackClient{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := worker.waitingMode(ctx)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("waitingMode returned error: %v", err)
+	}
+	if worker.getState() != StateMonitoring {
+		t.Fatalf("state = %v, want %v", worker.getState(), StateMonitoring)
+	}
+	// The stub returns instantly, so the check should complete well under 500ms.
+	// If it waited for the 10s ticker, this would fail.
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("waitingMode took %v, expected immediate first check", elapsed)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("expected 1 webhook call, got %d", len(sender.calls))
+	}
+	if sender.calls[0].EventType != webhook.EventStreamStarted {
+		t.Fatalf("event_type = %v, want %v", sender.calls[0].EventType, webhook.EventStreamStarted)
+	}
+}
+
 func TestWaitingModeSendsStreamEnded(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
