@@ -334,6 +334,19 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		}
 
 		if !eventPersisted {
+			// Initial CreateEvent failed; retry with final status so the audit trail is not lost.
+			event.WebhookStatus = whStatus
+			event.WebhookAttempts = result.Attempts
+			event.WebhookLastError = whError
+			event.SentAt = sentAt
+			retryCtx, retryCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
+			defer retryCancel()
+			if err := r.repo.CreateEvent(retryCtx, event); err != nil {
+				log.Warn("retry: failed to record reconciliation error event",
+					zap.String("monitor_id", monitor.ID),
+					zap.Error(err),
+				)
+			}
 			return
 		}
 
