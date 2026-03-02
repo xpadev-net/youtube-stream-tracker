@@ -32,6 +32,7 @@ const (
 	WebhookStatusPending WebhookStatus = "pending"
 	WebhookStatusSent    WebhookStatus = "sent"
 	WebhookStatusFailed  WebhookStatus = "failed"
+	WebhookStatusSkipped WebhookStatus = "skipped" // no callback URL configured; nothing to deliver
 )
 
 // HealthStatus represents health status of video/audio.
