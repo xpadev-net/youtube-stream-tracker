@@ -213,10 +213,6 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 // sendErrorWebhook sends a monitor.error webhook to both the operator URL
 // and the monitor's registered callback URL, and records the event in the DB.
 func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, reason, message string) {
-	if r.webhookSender == nil {
-		return
-	}
-
 	data := map[string]interface{}{
 		"reason":                reason,
 		"reconciliation_action": "mark_as_error_missing_pod",
@@ -238,7 +234,7 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 	}
 
 	// Send to operator webhook (fire-and-forget)
-	if r.reconciliationWebhookURL != "" {
+	if r.webhookSender != nil && r.reconciliationWebhookURL != "" {
 		go func() {
 			sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -253,14 +249,13 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		}()
 	}
 
-	// Record event in DB for audit trail (regardless of callback URL)
+	// Record event in DB for audit trail (regardless of callback URL or webhookSender)
 	payloadJSON, err := json.Marshal(data)
 	if err != nil {
 		log.Warn("failed to marshal reconciliation error webhook payload",
 			zap.String("monitor_id", monitor.ID),
 			zap.Error(err),
 		)
-		return
 	}
 
 	event := &db.MonitorEvent{
@@ -270,21 +265,22 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		WebhookStatus: db.WebhookStatusPending,
 	}
 
-	if monitor.CallbackURL == "" {
-		// No callback URL — nothing to deliver
+	if r.webhookSender == nil || monitor.CallbackURL == "" {
+		// No webhook sender or no callback URL — nothing to deliver
 		event.WebhookStatus = db.WebhookStatusSent
 		now := time.Now()
 		event.SentAt = &now
 	}
 
-	if err := r.repo.CreateEvent(ctx, event); err != nil {
+	if err := r.repo.CreateEvent(context.Background(), event); err != nil {
 		log.Warn("failed to record reconciliation error event",
 			zap.String("monitor_id", monitor.ID),
 			zap.Error(err),
 		)
+		return
 	}
 
-	if monitor.CallbackURL == "" {
+	if r.webhookSender == nil || monitor.CallbackURL == "" {
 		return
 	}
 
