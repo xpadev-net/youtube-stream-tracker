@@ -273,6 +273,8 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		)
 	}
 
+	willSendCallback := r.webhookSender != nil && monitor.CallbackURL != ""
+
 	event := &db.MonitorEvent{
 		MonitorID:     monitor.ID,
 		EventType:     string(webhook.EventMonitorError),
@@ -280,17 +282,18 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		WebhookStatus: db.WebhookStatusPending,
 	}
 
-	switch {
-	case monitor.CallbackURL == "":
-		// No callback URL — nothing to deliver
-		event.WebhookStatus = db.WebhookStatusSent
-		now := time.Now()
-		event.SentAt = &now
-	case r.webhookSender == nil:
-		// Callback URL exists but no sender configured — record as failed
-		event.WebhookStatus = db.WebhookStatusFailed
-		errMsg := "no webhook sender available"
-		event.WebhookLastError = &errMsg
+	if !willSendCallback {
+		if monitor.CallbackURL != "" {
+			// Callback URL exists but no sender configured
+			event.WebhookStatus = db.WebhookStatusFailed
+			errMsg := "no webhook sender available"
+			event.WebhookLastError = &errMsg
+		} else {
+			// No callback URL — nothing to deliver
+			event.WebhookStatus = db.WebhookStatusSent
+			now := time.Now()
+			event.SentAt = &now
+		}
 	}
 
 	auditCtx, auditCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
@@ -304,7 +307,7 @@ func (r *Reconciler) sendErrorWebhook(ctx context.Context, monitor *db.Monitor, 
 		return
 	}
 
-	if r.webhookSender == nil || monitor.CallbackURL == "" {
+	if !willSendCallback {
 		return
 	}
 
