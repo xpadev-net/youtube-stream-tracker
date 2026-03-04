@@ -587,7 +587,7 @@ func (w *Worker) processBlackDetection(ctx context.Context, result *ffmpeg.Black
 			now := time.Now()
 			w.blackoutStart = &now
 		}
-		if !w.blackoutAlertSent {
+		if !w.blackoutAlertSent && w.consecutiveBlack >= w.cfg.BlackoutThreshold.Seconds() {
 			w.blackoutEvents++
 			w.blackoutAlertSent = true
 			startTime := *w.blackoutStart
