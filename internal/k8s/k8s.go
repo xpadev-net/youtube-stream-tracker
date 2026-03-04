@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -100,41 +99,16 @@ func (c *Client) SetOwnerReference(ref *metav1.OwnerReference) {
 	c.ownerRef = ref
 }
 
-// ResolveOwnerDeployment resolves the owner Deployment by traversing the
-// owner chain: Pod → ReplicaSet → Deployment. Returns an error if the
-// chain cannot be resolved (e.g., pod is not managed by a Deployment).
-func (c *Client) ResolveOwnerDeployment(ctx context.Context, podName string) (*metav1.OwnerReference, error) {
-	// Get the gateway pod
+// ResolveOwnerPod resolves the operator's own Pod and returns an OwnerReference
+// pointing to it. Worker pods will be garbage-collected when the operator pod
+// is deleted (e.g., during rolling updates).
+func (c *Client) ResolveOwnerPod(ctx context.Context, podName string) (*metav1.OwnerReference, error) {
 	pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("get gateway pod %q: %w", podName, err)
 	}
 
-	// Find the ReplicaSet owner
-	rsRef := findOwnerReference(pod.OwnerReferences, "ReplicaSet")
-	if rsRef == nil {
-		return nil, fmt.Errorf("gateway pod %q has no ReplicaSet owner", podName)
-	}
-
-	// Get the ReplicaSet
-	rs, err := c.clientset.AppsV1().ReplicaSets(c.namespace).Get(ctx, rsRef.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("get ReplicaSet %q: %w", rsRef.Name, err)
-	}
-
-	// Find the Deployment owner
-	deployRef := findOwnerReference(rs.OwnerReferences, "Deployment")
-	if deployRef == nil {
-		return nil, fmt.Errorf("ReplicaSet %q has no Deployment owner", rsRef.Name)
-	}
-
-	// Get the Deployment to confirm it exists and get its UID
-	deploy, err := c.clientset.AppsV1().Deployments(c.namespace).Get(ctx, deployRef.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("get Deployment %q: %w", deployRef.Name, err)
-	}
-
-	return buildDeploymentOwnerReference(deploy), nil
+	return buildPodOwnerReference(pod), nil
 }
 
 // buildOwnerReferences returns the ownerReferences slice for worker pods.
@@ -146,23 +120,13 @@ func (c *Client) buildOwnerReferences() []metav1.OwnerReference {
 	return []metav1.OwnerReference{*c.ownerRef}
 }
 
-// findOwnerReference finds the first owner reference with the given kind.
-func findOwnerReference(refs []metav1.OwnerReference, kind string) *metav1.OwnerReference {
-	for i := range refs {
-		if refs[i].Kind == kind {
-			return &refs[i]
-		}
-	}
-	return nil
-}
-
-// buildDeploymentOwnerReference constructs an OwnerReference from a Deployment.
-func buildDeploymentOwnerReference(deploy *appsv1.Deployment) *metav1.OwnerReference {
+// buildPodOwnerReference constructs an OwnerReference from a Pod.
+func buildPodOwnerReference(pod *corev1.Pod) *metav1.OwnerReference {
 	return &metav1.OwnerReference{
-		APIVersion:         "apps/v1",
-		Kind:               "Deployment",
-		Name:               deploy.Name,
-		UID:                deploy.UID,
+		APIVersion:         "v1",
+		Kind:               "Pod",
+		Name:               pod.Name,
+		UID:                pod.UID,
 		BlockOwnerDeletion: boolPtr(true),
 	}
 }
@@ -171,8 +135,8 @@ func buildDeploymentOwnerReference(deploy *appsv1.Deployment) *metav1.OwnerRefer
 // Exported for testing purposes.
 func BuildOwnerReference(name string, uid types.UID) *metav1.OwnerReference {
 	return &metav1.OwnerReference{
-		APIVersion:         "apps/v1",
-		Kind:               "Deployment",
+		APIVersion:         "v1",
+		Kind:               "Pod",
 		Name:               name,
 		UID:                uid,
 		BlockOwnerDeletion: boolPtr(true),
