@@ -666,9 +666,10 @@ func TestProcessBlackDetection_NoDuplicateAlert(t *testing.T) {
 	}
 }
 
-func TestProcessSilenceDetection_ImmediateAlert(t *testing.T) {
+func TestProcessSilenceDetection_AlertAfterThreshold(t *testing.T) {
 	sender := &captureWebhookSender{}
 	worker := newTestWorkerForDetection(sender)
+	worker.cfg.SilenceThreshold = 1 * time.Second
 
 	result := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
 	worker.processSilenceDetection(context.Background(), result, 2.0)
@@ -690,9 +691,29 @@ func TestProcessSilenceDetection_ImmediateAlert(t *testing.T) {
 	}
 }
 
+func TestProcessSilenceDetection_NoAlertBelowThreshold(t *testing.T) {
+	sender := &captureWebhookSender{}
+	worker := newTestWorkerForDetection(sender)
+	// SilenceThreshold defaults to 30s; a single 2s segment should not trigger alert
+
+	result := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
+	worker.processSilenceDetection(context.Background(), result, 2.0)
+
+	if len(sender.calls) != 0 {
+		t.Fatalf("expected 0 webhook calls below threshold, got %d", len(sender.calls))
+	}
+	if worker.silenceAlertSent {
+		t.Fatalf("expected silenceAlertSent to be false below threshold")
+	}
+	if worker.consecutiveSilence != 2.0 {
+		t.Fatalf("consecutiveSilence = %f, want 2.0", worker.consecutiveSilence)
+	}
+}
+
 func TestProcessSilenceDetection_NoDuplicateAlert(t *testing.T) {
 	sender := &captureWebhookSender{}
 	worker := newTestWorkerForDetection(sender)
+	worker.cfg.SilenceThreshold = 1 * time.Second
 
 	result := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
 	worker.processSilenceDetection(context.Background(), result, 2.0)
@@ -709,8 +730,9 @@ func TestProcessSilenceDetection_NoDuplicateAlert(t *testing.T) {
 func TestProcessSilenceDetection_RecoveryUnchanged(t *testing.T) {
 	sender := &captureWebhookSender{}
 	worker := newTestWorkerForDetection(sender)
+	worker.cfg.SilenceThreshold = 1 * time.Second
 
-	// First: trigger immediate silence alert
+	// First: trigger silence alert (threshold=1s, segment=2s)
 	silentResult := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
 	worker.processSilenceDetection(context.Background(), silentResult, 2.0)
 
