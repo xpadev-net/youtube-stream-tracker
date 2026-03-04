@@ -645,7 +645,7 @@ func (w *Worker) processSilenceDetection(ctx context.Context, result *ffmpeg.Sil
 			w.silenceStart = &now
 		}
 
-		if !w.silenceAlertSent {
+		if !w.silenceAlertSent && w.consecutiveSilence >= w.cfg.SilenceThreshold.Seconds() {
 			w.silenceEvents++
 			w.silenceAlertSent = true
 			startTime := *w.silenceStart
