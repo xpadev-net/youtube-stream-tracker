@@ -654,7 +654,7 @@ func TestProcessBlackDetection_AlertAfterThreshold(t *testing.T) {
 func TestProcessBlackDetection_NoAlertBelowThreshold(t *testing.T) {
 	sender := &captureWebhookSender{}
 	worker := newTestWorkerForDetection(sender)
-	// BlackoutThreshold defaults to 30s; a single 2s segment should not trigger alert
+	worker.cfg.BlackoutThreshold = 5 * time.Second // segment is 2s, must stay below threshold
 
 	result := &ffmpeg.BlackDetectResult{FullyBlack: true, BlackRatio: 1.0}
 	worker.processBlackDetection(context.Background(), result, 2.0)
@@ -667,6 +667,20 @@ func TestProcessBlackDetection_NoAlertBelowThreshold(t *testing.T) {
 	}
 	if worker.consecutiveBlack != 2.0 {
 		t.Fatalf("consecutiveBlack = %f, want 2.0", worker.consecutiveBlack)
+	}
+
+	// Verify recovery resets state without firing an alert
+	clearResult := &ffmpeg.BlackDetectResult{FullyBlack: false}
+	worker.processBlackDetection(context.Background(), clearResult, 2.0)
+
+	if len(sender.calls) != 0 {
+		t.Fatalf("expected 0 webhook calls after sub-threshold recovery, got %d", len(sender.calls))
+	}
+	if worker.consecutiveBlack != 0 {
+		t.Fatalf("consecutiveBlack = %f, want 0 after recovery", worker.consecutiveBlack)
+	}
+	if worker.blackoutStart != nil {
+		t.Fatalf("expected blackoutStart to be nil after recovery")
 	}
 }
 
@@ -718,7 +732,7 @@ func TestProcessSilenceDetection_AlertAfterThreshold(t *testing.T) {
 func TestProcessSilenceDetection_NoAlertBelowThreshold(t *testing.T) {
 	sender := &captureWebhookSender{}
 	worker := newTestWorkerForDetection(sender)
-	// SilenceThreshold defaults to 30s; a single 2s segment should not trigger alert
+	worker.cfg.SilenceThreshold = 5 * time.Second // segment is 2s, must stay below threshold
 
 	result := &ffmpeg.SilenceDetectResult{FullySilent: true, SilenceRatio: 1.0}
 	worker.processSilenceDetection(context.Background(), result, 2.0)
@@ -731,6 +745,20 @@ func TestProcessSilenceDetection_NoAlertBelowThreshold(t *testing.T) {
 	}
 	if worker.consecutiveSilence != 2.0 {
 		t.Fatalf("consecutiveSilence = %f, want 2.0", worker.consecutiveSilence)
+	}
+
+	// Verify recovery resets state without firing an alert
+	clearResult := &ffmpeg.SilenceDetectResult{FullySilent: false}
+	worker.processSilenceDetection(context.Background(), clearResult, 2.0)
+
+	if len(sender.calls) != 0 {
+		t.Fatalf("expected 0 webhook calls after sub-threshold recovery, got %d", len(sender.calls))
+	}
+	if worker.consecutiveSilence != 0 {
+		t.Fatalf("consecutiveSilence = %f, want 0 after recovery", worker.consecutiveSilence)
+	}
+	if worker.silenceStart != nil {
+		t.Fatalf("expected silenceStart to be nil after recovery")
 	}
 }
 
