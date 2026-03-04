@@ -37,7 +37,7 @@ const (
 
 // Client wraps Kubernetes client operations.
 type Client struct {
-	clientset   *kubernetes.Clientset
+	clientset   kubernetes.Interface
 	namespace   string
 	workerImage string
 	workerTag   string

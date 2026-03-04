@@ -1,9 +1,13 @@
 package k8s
 
 import (
+	"context"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestPodNamePrefix(t *testing.T) {
@@ -133,6 +137,55 @@ func TestBuildOwnerReferences_WithOwnerRef(t *testing.T) {
 	}
 	if got.Kind != "Pod" {
 		t.Errorf("OwnerReference.Kind = %v, want Pod", got.Kind)
+	}
+}
+
+func TestResolveOwnerPod(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+			UID:       types.UID("gateway-uid-abc123"),
+		},
+	}
+
+	fakeClient := fake.NewSimpleClientset(pod)
+	client := &Client{
+		clientset: fakeClient,
+		namespace: "default",
+	}
+
+	ref, err := client.ResolveOwnerPod(context.Background(), "test-gateway")
+	if err != nil {
+		t.Fatalf("ResolveOwnerPod() returned error: %v", err)
+	}
+	if ref.APIVersion != "v1" {
+		t.Errorf("APIVersion = %v, want v1", ref.APIVersion)
+	}
+	if ref.Kind != "Pod" {
+		t.Errorf("Kind = %v, want Pod", ref.Kind)
+	}
+	if ref.Name != "test-gateway" {
+		t.Errorf("Name = %v, want test-gateway", ref.Name)
+	}
+	if ref.UID != pod.UID {
+		t.Errorf("UID = %v, want %v", ref.UID, pod.UID)
+	}
+	if ref.BlockOwnerDeletion == nil || !*ref.BlockOwnerDeletion {
+		t.Error("BlockOwnerDeletion should be true")
+	}
+}
+
+func TestResolveOwnerPod_NotFound(t *testing.T) {
+	fakeClient := fake.NewSimpleClientset()
+	client := &Client{
+		clientset: fakeClient,
+		namespace: "default",
+	}
+
+	_, err := client.ResolveOwnerPod(context.Background(), "nonexistent-pod")
+	if err == nil {
+		t.Fatal("ResolveOwnerPod() should return error for nonexistent pod")
 	}
 }
 
