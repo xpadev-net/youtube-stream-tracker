@@ -65,7 +65,7 @@ func (w *PodWatcher) watchLoop(ctx context.Context) error {
 
 	resourceVersion := podList.ResourceVersion
 
-	// Process any already-failed pods from the list
+	// Process any already-terminated pods from the list
 	for i := range podList.Items {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -104,9 +104,9 @@ func (w *PodWatcher) watchLoop(ctx context.Context) error {
 	}
 }
 
-// handlePodEvent processes a pod event and sends a webhook if the pod has failed.
+// handlePodEvent processes a pod event for terminated pods (failed or succeeded).
 func (w *PodWatcher) handlePodEvent(ctx context.Context, pod *corev1.Pod) {
-	if pod.Status.Phase != corev1.PodFailed {
+	if pod.Status.Phase != corev1.PodFailed && pod.Status.Phase != corev1.PodSucceeded {
 		return
 	}
 
@@ -117,7 +117,7 @@ func (w *PodWatcher) handlePodEvent(ctx context.Context, pod *corev1.Pod) {
 
 	monitor, err := w.repo.GetByID(ctx, monitorID)
 	if err != nil {
-		log.Warn("failed to get monitor for failed pod",
+		log.Warn("failed to get monitor for terminated pod",
 			zap.String("monitor_id", monitorID),
 			zap.String("pod_name", pod.Name),
 			zap.Error(err),
@@ -130,7 +130,38 @@ func (w *PodWatcher) handlePodEvent(ctx context.Context, pod *corev1.Pod) {
 		return
 	}
 
-	// Atomically update status to error
+	if pod.Status.Phase == corev1.PodSucceeded {
+		// Worker pod completed successfully but monitor status was not updated
+		// (e.g. the worker failed to report its status before exiting).
+		updated, err := w.repo.UpdateStatusWithCondition(ctx, monitorID, monitor.Status, db.StatusCompleted)
+		if err != nil {
+			log.Error("failed to update monitor status for succeeded pod",
+				zap.String("monitor_id", monitorID),
+				zap.Error(err),
+			)
+			return
+		}
+
+		if !updated {
+			return
+		}
+
+		log.Info("worker pod succeeded but monitor was still active, marked as completed",
+			zap.String("monitor_id", monitorID),
+			zap.String("pod_name", pod.Name),
+		)
+
+		// Clean up the succeeded pod
+		if err := w.k8sClient.DeleteWorkerPod(ctx, monitorID); err != nil {
+			log.Error("failed to delete succeeded worker pod",
+				zap.String("monitor_id", monitorID),
+				zap.Error(err),
+			)
+		}
+		return
+	}
+
+	// Pod failed — update status to error
 	updated, err := w.repo.UpdateStatusWithCondition(ctx, monitorID, monitor.Status, db.StatusError)
 	if err != nil {
 		log.Error("failed to update monitor status for failed pod",

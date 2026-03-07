@@ -136,7 +136,7 @@ func TestExtractPodFailureInfo_InitContainerFailure(t *testing.T) {
 
 func TestHandlePodEvent_RunningPodSkipped(t *testing.T) {
 	// A PodWatcher with nil dependencies should not panic on a running pod
-	// because handlePodEvent returns early when phase != Failed.
+	// because handlePodEvent returns early when phase is not Failed or Succeeded.
 	watcher := &PodWatcher{}
 
 	pod := &corev1.Pod{
@@ -156,9 +156,29 @@ func TestHandlePodEvent_RunningPodSkipped(t *testing.T) {
 	watcher.handlePodEvent(nil, pod)
 }
 
+func TestHandlePodEvent_PendingPodSkipped(t *testing.T) {
+	watcher := &PodWatcher{}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "stream-monitor-mon-456",
+			Labels: map[string]string{
+				LabelApp:       LabelAppValue,
+				LabelMonitorID: "mon-456",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+		},
+	}
+
+	watcher.handlePodEvent(nil, pod)
+}
+
 func TestHandlePodEvent_NoMonitorIDSkipped(t *testing.T) {
 	watcher := &PodWatcher{}
 
+	// Failed pod without monitor ID
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "stream-monitor-unknown",
@@ -168,7 +188,17 @@ func TestHandlePodEvent_NoMonitorIDSkipped(t *testing.T) {
 			Phase: corev1.PodFailed,
 		},
 	}
-
-	// Should return early because monitorID is empty
 	watcher.handlePodEvent(nil, pod)
+
+	// Succeeded pod without monitor ID
+	podSucceeded := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "stream-monitor-unknown-2",
+			Labels: map[string]string{},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodSucceeded,
+		},
+	}
+	watcher.handlePodEvent(nil, podSucceeded)
 }
