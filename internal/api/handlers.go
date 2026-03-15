@@ -292,19 +292,19 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 		return
 	}
 
-	// Update status to stopped
-	if err := h.repo.UpdateStatus(c.Request.Context(), monitorID, db.StatusStopped); err != nil {
-		log.Error("failed to update monitor status", zap.Error(err))
-		httpapi.RespondInternalError(c, "Failed to stop monitor")
+	// Delete the monitor record from the database
+	if err := h.repo.Delete(c.Request.Context(), monitorID); err != nil {
+		log.Error("failed to delete monitor", zap.Error(err))
+		httpapi.RespondInternalError(c, "Failed to delete monitor")
 		return
 	}
 
-	log.Info("monitor stopped", zap.String("monitor_id", monitorID))
+	log.Info("monitor deleted", zap.String("monitor_id", monitorID))
 
 	// Delete worker pod if reconciler is configured
 	if h.reconciler != nil {
 		if err := h.reconciler.DeleteMonitorPod(c.Request.Context(), monitorID); err != nil {
-			// Log error but don't fail the request (DB update already succeeded)
+			// Log error but don't fail the request (DB delete already succeeded)
 			log.Error("failed to delete worker pod",
 				zap.String("monitor_id", monitorID),
 				zap.Error(err),
