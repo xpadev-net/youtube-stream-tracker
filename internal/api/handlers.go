@@ -295,6 +295,7 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 	}
 
 	log.Info("monitor deleted", zap.String("monitor_id", monitorID))
+	deletedAt := time.Now() // capture timestamp right after DB deletion
 
 	// Best-effort pod cleanup; periodic reconciler will catch any stragglers.
 	if h.reconciler != nil {
@@ -311,7 +312,7 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 	httpapi.RespondOK(c, DeleteMonitorResponse{
 		MonitorID: monitorID,
 		Deleted:   true,
-		DeletedAt: time.Now().Format(time.RFC3339),
+		DeletedAt: deletedAt.Format(time.RFC3339),
 	})
 }
 
