@@ -280,20 +280,10 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 		return
 	}
 
-	// Delete worker pod first to avoid orphaning a running pod
-	if h.reconciler != nil {
-		if err := h.reconciler.DeleteMonitorPod(c.Request.Context(), monitorID); err != nil {
-			log.Error("failed to delete worker pod",
-				zap.String("monitor_id", monitorID),
-				zap.Error(err),
-			)
-			httpapi.RespondInternalError(c, "Failed to delete worker pod")
-			return
-		}
-		log.Info("worker pod deleted", zap.String("monitor_id", monitorID))
-	}
-
-	// Delete the monitor record from the database
+	// Delete the monitor record from the database first.
+	// Pod cleanup is best-effort afterward — the periodic reconciler
+	// handles orphaned pods (pods with no DB record), so this ordering
+	// is consistent with TerminateMonitor and avoids ghost DB records.
 	if err := h.repo.Delete(c.Request.Context(), monitorID); err != nil {
 		if errors.Is(err, db.ErrMonitorNotFound) {
 			httpapi.RespondNotFound(c, "Monitor not found")
@@ -305,6 +295,18 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 	}
 
 	log.Info("monitor deleted", zap.String("monitor_id", monitorID))
+
+	// Best-effort pod cleanup; periodic reconciler will catch any stragglers.
+	if h.reconciler != nil {
+		if err := h.reconciler.DeleteMonitorPod(c.Request.Context(), monitorID); err != nil {
+			log.Warn("failed to delete worker pod after DB deletion; periodic reconciler will clean up",
+				zap.String("monitor_id", monitorID),
+				zap.Error(err),
+			)
+		} else {
+			log.Info("worker pod deleted", zap.String("monitor_id", monitorID))
+		}
+	}
 
 	httpapi.RespondOK(c, DeleteMonitorResponse{
 		MonitorID: monitorID,
