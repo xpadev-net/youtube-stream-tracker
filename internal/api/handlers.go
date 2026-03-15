@@ -280,6 +280,19 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 		return
 	}
 
+	// Delete worker pod first to avoid orphaning a running pod
+	if h.reconciler != nil {
+		if err := h.reconciler.DeleteMonitorPod(c.Request.Context(), monitorID); err != nil {
+			log.Error("failed to delete worker pod",
+				zap.String("monitor_id", monitorID),
+				zap.Error(err),
+			)
+			httpapi.RespondInternalError(c, "Failed to delete worker pod")
+			return
+		}
+		log.Info("worker pod deleted", zap.String("monitor_id", monitorID))
+	}
+
 	// Delete the monitor record from the database
 	if err := h.repo.Delete(c.Request.Context(), monitorID); err != nil {
 		if errors.Is(err, db.ErrMonitorNotFound) {
@@ -292,19 +305,6 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 	}
 
 	log.Info("monitor deleted", zap.String("monitor_id", monitorID))
-
-	// Delete worker pod if reconciler is configured
-	if h.reconciler != nil {
-		if err := h.reconciler.DeleteMonitorPod(c.Request.Context(), monitorID); err != nil {
-			// Log error but don't fail the request (DB delete already succeeded)
-			log.Error("failed to delete worker pod",
-				zap.String("monitor_id", monitorID),
-				zap.Error(err),
-			)
-		} else {
-			log.Info("worker pod deleted", zap.String("monitor_id", monitorID))
-		}
-	}
 
 	httpapi.RespondOK(c, DeleteMonitorResponse{
 		MonitorID: monitorID,

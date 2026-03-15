@@ -210,6 +210,12 @@ func TestResponseStructures(t *testing.T) {
 	if unmarshaledDelete.MonitorID != deleteResp.MonitorID {
 		t.Errorf("Unmarshaled MonitorID = %v, want %v", unmarshaledDelete.MonitorID, deleteResp.MonitorID)
 	}
+	if unmarshaledDelete.Deleted != deleteResp.Deleted {
+		t.Errorf("Unmarshaled Deleted = %v, want %v", unmarshaledDelete.Deleted, deleteResp.Deleted)
+	}
+	if unmarshaledDelete.DeletedAt != deleteResp.DeletedAt {
+		t.Errorf("Unmarshaled DeletedAt = %v, want %v", unmarshaledDelete.DeletedAt, deleteResp.DeletedAt)
+	}
 }
 
 // TestHealthResponse tests the health response structure
@@ -311,4 +317,32 @@ func TestHandlerStructure(t *testing.T) {
 	}
 
 	_ = handler // Suppress unused variable warning
+}
+
+// TestDeleteMonitorInvalidID tests that DeleteMonitor returns 404 for invalid monitor IDs.
+func TestDeleteMonitorInvalidID(t *testing.T) {
+	handler := NewHandler(&db.MonitorRepository{}, 50, nil, "key", "sign", "secrets", "ak", "sk")
+	router := setupTestRouter()
+	router.DELETE("/api/v1/monitors/:monitor_id", handler.DeleteMonitor)
+
+	tests := []struct {
+		name       string
+		monitorID  string
+		wantStatus int
+	}{
+		{"invalid format", "invalid-id", http.StatusNotFound},
+		{"empty", "", http.StatusNotFound}, // hits 301 redirect or 404
+		{"wrong prefix", "xxx-019cc345-8cb0-7360-92b8-b2053687b94e", http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("DELETE", "/api/v1/monitors/"+tt.monitorID, nil)
+			router.ServeHTTP(w, req)
+			if w.Code != tt.wantStatus {
+				t.Errorf("DELETE %s: got status %d, want %d", tt.monitorID, w.Code, tt.wantStatus)
+			}
+		})
+	}
 }
