@@ -268,8 +268,8 @@ func (h *Handler) GetMonitor(c *gin.Context) {
 // DeleteMonitorResponse represents the response for deleting a monitor.
 type DeleteMonitorResponse struct {
 	MonitorID string `json:"monitor_id"`
-	Status    string `json:"status"`
-	StoppedAt string `json:"stopped_at"`
+	Deleted   bool   `json:"deleted"`
+	DeletedAt string `json:"deleted_at"`
 }
 
 // DeleteMonitor handles DELETE /api/v1/monitors/:monitor_id
@@ -280,32 +280,27 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 		return
 	}
 
-	// Get current monitor to check it exists
-	_, err := h.repo.GetByID(c.Request.Context(), monitorID)
-	if err != nil {
+	// Delete the monitor record from the database first.
+	// Pod cleanup is best-effort afterward — the periodic reconciler
+	// handles orphaned pods (pods with no DB record), so this ordering
+	// is consistent with TerminateMonitor and avoids ghost DB records.
+	if err := h.repo.Delete(c.Request.Context(), monitorID); err != nil {
 		if errors.Is(err, db.ErrMonitorNotFound) {
 			httpapi.RespondNotFound(c, "Monitor not found")
 			return
 		}
-		log.Error("failed to get monitor", zap.Error(err))
-		httpapi.RespondInternalError(c, "Failed to get monitor")
+		log.Error("failed to delete monitor", zap.Error(err))
+		httpapi.RespondInternalError(c, "Failed to delete monitor")
 		return
 	}
 
-	// Update status to stopped
-	if err := h.repo.UpdateStatus(c.Request.Context(), monitorID, db.StatusStopped); err != nil {
-		log.Error("failed to update monitor status", zap.Error(err))
-		httpapi.RespondInternalError(c, "Failed to stop monitor")
-		return
-	}
+	log.Info("monitor deleted", zap.String("monitor_id", monitorID))
+	deletedAt := time.Now() // capture timestamp right after DB deletion
 
-	log.Info("monitor stopped", zap.String("monitor_id", monitorID))
-
-	// Delete worker pod if reconciler is configured
+	// Best-effort pod cleanup; periodic reconciler will catch any stragglers.
 	if h.reconciler != nil {
 		if err := h.reconciler.DeleteMonitorPod(c.Request.Context(), monitorID); err != nil {
-			// Log error but don't fail the request (DB update already succeeded)
-			log.Error("failed to delete worker pod",
+			log.Error("failed to delete worker pod after DB deletion; periodic reconciler will clean up",
 				zap.String("monitor_id", monitorID),
 				zap.Error(err),
 			)
@@ -316,8 +311,8 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 
 	httpapi.RespondOK(c, DeleteMonitorResponse{
 		MonitorID: monitorID,
-		Status:    string(db.StatusStopped),
-		StoppedAt: time.Now().Format(time.RFC3339),
+		Deleted:   true,
+		DeletedAt: deletedAt.Format(time.RFC3339),
 	})
 }
 
