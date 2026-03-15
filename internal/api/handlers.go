@@ -268,8 +268,8 @@ func (h *Handler) GetMonitor(c *gin.Context) {
 // DeleteMonitorResponse represents the response for deleting a monitor.
 type DeleteMonitorResponse struct {
 	MonitorID string `json:"monitor_id"`
-	Status    string `json:"status"`
-	StoppedAt string `json:"stopped_at"`
+	Deleted   bool   `json:"deleted"`
+	DeletedAt string `json:"deleted_at"`
 }
 
 // DeleteMonitor handles DELETE /api/v1/monitors/:monitor_id
@@ -280,20 +280,12 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 		return
 	}
 
-	// Get current monitor to check it exists
-	_, err := h.repo.GetByID(c.Request.Context(), monitorID)
-	if err != nil {
+	// Delete the monitor record from the database
+	if err := h.repo.Delete(c.Request.Context(), monitorID); err != nil {
 		if errors.Is(err, db.ErrMonitorNotFound) {
 			httpapi.RespondNotFound(c, "Monitor not found")
 			return
 		}
-		log.Error("failed to get monitor", zap.Error(err))
-		httpapi.RespondInternalError(c, "Failed to get monitor")
-		return
-	}
-
-	// Delete the monitor record from the database
-	if err := h.repo.Delete(c.Request.Context(), monitorID); err != nil {
 		log.Error("failed to delete monitor", zap.Error(err))
 		httpapi.RespondInternalError(c, "Failed to delete monitor")
 		return
@@ -316,8 +308,8 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 
 	httpapi.RespondOK(c, DeleteMonitorResponse{
 		MonitorID: monitorID,
-		Status:    string(db.StatusStopped),
-		StoppedAt: time.Now().Format(time.RFC3339),
+		Deleted:   true,
+		DeletedAt: time.Now().Format(time.RFC3339),
 	})
 }
 

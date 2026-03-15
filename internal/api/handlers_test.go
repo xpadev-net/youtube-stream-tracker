@@ -192,8 +192,8 @@ func TestResponseStructures(t *testing.T) {
 	// Test DeleteMonitorResponse
 	deleteResp := DeleteMonitorResponse{
 		MonitorID: "mon-123",
-		Status:    "stopped",
-		StoppedAt: "2026-01-24T00:00:00Z",
+		Deleted:   true,
+		DeletedAt: "2026-01-24T00:00:00Z",
 	}
 
 	jsonData, err = json.Marshal(deleteResp)
