@@ -299,7 +299,7 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 	// Best-effort pod cleanup; periodic reconciler will catch any stragglers.
 	if h.reconciler != nil {
 		if err := h.reconciler.DeleteMonitorPod(c.Request.Context(), monitorID); err != nil {
-			log.Warn("failed to delete worker pod after DB deletion; periodic reconciler will clean up",
+			log.Error("failed to delete worker pod after DB deletion; periodic reconciler will clean up",
 				zap.String("monitor_id", monitorID),
 				zap.Error(err),
 			)

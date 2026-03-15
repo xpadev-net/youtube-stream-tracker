@@ -331,7 +331,7 @@ func TestDeleteMonitorInvalidID(t *testing.T) {
 		wantStatus int
 	}{
 		{"invalid format", "invalid-id", http.StatusNotFound},
-		{"empty", "", http.StatusNotFound}, // hits 301 redirect or 404
+		{"empty", "", http.StatusNotFound}, // no route matches empty segment, gin returns 404
 		{"wrong prefix", "xxx-019cc345-8cb0-7360-92b8-b2053687b94e", http.StatusNotFound},
 	}
 
