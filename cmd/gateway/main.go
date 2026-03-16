@@ -156,10 +156,10 @@ func main() {
 	v1 := router.Group("/api/v1")
 	v1.Use(httpapi.APIKeyAuth(cfg.APIKey))
 	{
-		v1.POST("/monitors", httpapi.RateLimit(10, time.Minute), handler.CreateMonitor)
+		v1.POST("/monitors", httpapi.RateLimit(25, time.Minute), handler.CreateMonitor)
 		v1.GET("/monitors", httpapi.RateLimit(100, time.Minute), handler.ListMonitors)
 		v1.GET("/monitors/:monitor_id", httpapi.RateLimit(100, time.Minute), handler.GetMonitor)
-		v1.PATCH("/monitors/:monitor_id", httpapi.RateLimit(10, time.Minute), handler.PatchMonitor)
+		v1.PATCH("/monitors/:monitor_id", httpapi.RateLimit(25, time.Minute), handler.PatchMonitor)
 		v1.GET("/monitors/:monitor_id/events", httpapi.RateLimit(100, time.Minute), handler.ListEvents)
 		v1.DELETE("/monitors/:monitor_id", handler.DeleteMonitor)
 	}
