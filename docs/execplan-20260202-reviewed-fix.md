@@ -47,7 +47,7 @@
 
 まず仕様差分を要件に合わせる。DBマイグレーションで monitors.id のカラム長を 40 に修正し、internal/api/handlers.go の内部APIのリクエストボディを health と statistics を含むネスト構造に変更する。statistics と health のフィールド名は requirements に合わせる。Kubernetes Pod仕様は internal/k8s/k8s.go で修正し、emptyDir の volume と /tmp/segments へのマウント、resources requests/limits、terminationGracePeriodSeconds、コンテナ名、Probeのタイムアウトと失敗閾値を明示する。PodのSecretは環境変数直書きをやめ、Secret参照で注入する設計に変更し、HelmのSecretテンプレートとvaluesにも反映する。
 
-次に設定・エラーコード・レート制限を要件通りに整える。internal/config/config.go の環境変数名を DB_DSN と GATEWAY_RECONCILE_TIMEOUT に合わせつつ、既存の DATABASE_URL と RECONCILE_TIMEOUT は後方互換として読み取り可能にする。internal/httpapi/errors.go で INVALID_CONFIG, RATE_LIMIT_EXCEEDED, MAX_MONITORS_EXCEEDED を追加し、使用箇所を差し替える。レート制限は internal/httpapi/middleware.go で導入し、作成エンドポイントは 10/分、状態照会は 100/分の制限をかける。Goのレート制限ライブラリを利用し、IP単位またはAPI Key単位での制限を明記する。
+次に設定・エラーコード・レート制限を要件通りに整える。internal/config/config.go の環境変数名を DB_DSN と GATEWAY_RECONCILE_TIMEOUT に合わせつつ、既存の DATABASE_URL と RECONCILE_TIMEOUT は後方互換として読み取り可能にする。internal/httpapi/errors.go で INVALID_CONFIG, RATE_LIMIT_EXCEEDED, MAX_MONITORS_EXCEEDED を追加し、使用箇所を差し替える。レート制限は internal/httpapi/middleware.go で導入し、作成エンドポイントは 25/分、状態照会は 100/分の制限をかける。Goのレート制限ライブラリを利用し、IP単位またはAPI Key単位での制限を明記する。
 
 Workerの挙動を要件通りに揃える。Waiting Mode のポーリング間隔を配信開始前30秒、予定時刻超過後10秒に切り替えるロジックを internal/worker/worker.go に実装し、設定値として外部化する。Monitoring Modeでは EXT-X-ENDLIST を最優先で終了検出し、5分間隔の is_live チェックを必ず実行する。解析ループのバックプレッシャーは、解析が完了するまで次のマニフェスト取得を行わない構造に修正する。alert.segment_error は一度だけ送るよう状態フラグを持ち、同一状態で再送しない。blackout/silence のWebhookペイロードに segment_info を追加し、stream.ended に data を付与する。再整合の monitor.error ペイロードは reconciliation_action, previous_status, observed_state を含む要件形にする。
 
