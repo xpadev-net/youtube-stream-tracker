@@ -2,7 +2,6 @@ package k8s
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -10,20 +9,21 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/k8s/store"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/webhook"
 )
 
 // PodWatcher watches Kubernetes worker pods for failures and sends webhooks.
 type PodWatcher struct {
 	k8sClient     *Client
-	repo          *db.MonitorRepository
+	repo          *store.Store
 	webhookSender *webhook.Sender
 }
 
 // NewPodWatcher creates a new PodWatcher.
-func NewPodWatcher(k8sClient *Client, repo *db.MonitorRepository, webhookSender *webhook.Sender) *PodWatcher {
+func NewPodWatcher(k8sClient *Client, repo *store.Store, webhookSender *webhook.Sender) *PodWatcher {
 	return &PodWatcher{
 		k8sClient:     k8sClient,
 		repo:          repo,
@@ -133,7 +133,7 @@ func (w *PodWatcher) handlePodEvent(ctx context.Context, pod *corev1.Pod) {
 	if pod.Status.Phase == corev1.PodSucceeded {
 		// Worker pod completed successfully but monitor status was not updated
 		// (e.g. the worker failed to report its status before exiting).
-		updated, err := w.repo.UpdateStatusWithCondition(ctx, monitorID, monitor.Status, db.StatusCompleted)
+		updated, err := w.repo.UpdateStatusWithCondition(ctx, monitorID, monitor.Status, model.StatusCompleted)
 		if err != nil {
 			log.Error("failed to update monitor status for succeeded pod",
 				zap.String("monitor_id", monitorID),
@@ -162,7 +162,7 @@ func (w *PodWatcher) handlePodEvent(ctx context.Context, pod *corev1.Pod) {
 	}
 
 	// Pod failed — update status to error
-	updated, err := w.repo.UpdateStatusWithCondition(ctx, monitorID, monitor.Status, db.StatusError)
+	updated, err := w.repo.UpdateStatusWithCondition(ctx, monitorID, monitor.Status, model.StatusError)
 	if err != nil {
 		log.Error("failed to update monitor status for failed pod",
 			zap.String("monitor_id", monitorID),
@@ -198,8 +198,9 @@ func (w *PodWatcher) handlePodEvent(ctx context.Context, pod *corev1.Pod) {
 	}
 }
 
-// sendFailureWebhook sends a monitor.error webhook and records the event in the DB.
-func (w *PodWatcher) sendFailureWebhook(ctx context.Context, monitor *db.Monitor, podName string, exitCode int32, reason, message string) {
+// sendFailureWebhook sends a monitor.error webhook. Delivery outcome is
+// only logged locally (via zap) — there is no audit-log store anymore.
+func (w *PodWatcher) sendFailureWebhook(ctx context.Context, monitor *model.Monitor, podName string, exitCode int32, reason, message string) {
 	if w.webhookSender == nil || monitor.CallbackURL == "" {
 		return
 	}
@@ -227,38 +228,10 @@ func (w *PodWatcher) sendFailureWebhook(ctx context.Context, monitor *db.Monitor
 	defer cancel()
 
 	result := w.webhookSender.Send(sendCtx, monitor.CallbackURL, payload)
-
-	// Record event in DB for audit trail
-	whStatus := db.WebhookStatusSent
-	var whError *string
-	var sentAt *time.Time
-	if result.Success {
-		now := time.Now()
-		sentAt = &now
-	} else {
-		whStatus = db.WebhookStatusFailed
-		whError = &result.Error
+	if !result.Success {
 		log.Warn("failed to send pod failure webhook",
 			zap.String("monitor_id", monitor.ID),
 			zap.String("error", result.Error),
-		)
-	}
-
-	payloadJSON, _ := json.Marshal(data)
-	event := &db.MonitorEvent{
-		MonitorID:        monitor.ID,
-		EventType:        string(webhook.EventMonitorError),
-		Payload:          payloadJSON,
-		WebhookStatus:    whStatus,
-		WebhookAttempts:  result.Attempts,
-		WebhookLastError: whError,
-		SentAt:           sentAt,
-	}
-
-	if err := w.repo.CreateEvent(ctx, event); err != nil {
-		log.Warn("failed to record pod failure webhook event",
-			zap.String("monitor_id", monitor.ID),
-			zap.Error(err),
 		)
 	}
 }

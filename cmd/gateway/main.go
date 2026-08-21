@@ -11,12 +11,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"k8s.io/client-go/dynamic"
 
 	"github.com/xpadev-net/youtube-stream-tracker/internal/api"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/config"
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/httpapi"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/k8s"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/k8s/store"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/webhook"
 )
@@ -43,23 +44,9 @@ func main() {
 		zap.String("namespace", cfg.Namespace),
 	)
 
-	// Connect to database
 	ctx := context.Background()
-	database, err := db.New(ctx, cfg.DatabaseURL)
-	if err != nil {
-		log.Fatal("failed to connect to database", zap.Error(err))
-	}
-	defer database.Close()
 
-	// Run migrations
-	if err := database.Migrate(ctx); err != nil {
-		log.Fatal("failed to run migrations", zap.Error(err))
-	}
-
-	// Create repository
-	repo := db.NewMonitorRepository(database)
-
-	// Create K8s client and reconciler
+	// Create K8s client
 	k8sClient, err := k8s.NewClient(k8s.Config{
 		InCluster:      cfg.InCluster,
 		KubeConfigPath: cfg.KubeConfigPath,
@@ -71,27 +58,38 @@ func main() {
 		log.Fatal("failed to create k8s client", zap.Error(err))
 	}
 
-	// Resolve owner deployment for ownerReferences on worker pods
-	if cfg.PodName != "" {
-		resolveCtx, resolveCancel := context.WithTimeout(ctx, 10*time.Second)
-		defer resolveCancel()
-		ownerRef, err := k8sClient.ResolveOwnerDeployment(resolveCtx, cfg.PodName)
-		if err != nil {
-			log.Warn("failed to resolve owner deployment, worker pods will not have ownerReferences",
-				zap.Error(err))
-		} else {
-			k8sClient.SetOwnerReference(ownerRef)
-			log.Info("owner deployment resolved for worker pod ownerReferences",
-				zap.String("deployment", ownerRef.Name))
-		}
+	// Build the StreamMonitor store: a dynamic client for the CRD, backed
+	// by an informer cache. Both the typed clientset above and this
+	// dynamic client are built from the same *rest.Config.
+	restConfig, err := k8s.BuildRESTConfig(k8s.Config{
+		InCluster:      cfg.InCluster,
+		KubeConfigPath: cfg.KubeConfigPath,
+	})
+	if err != nil {
+		log.Fatal("failed to build kubernetes rest config", zap.Error(err))
+	}
+	dynClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		log.Fatal("failed to create dynamic client", zap.Error(err))
 	}
 
+	monitorStore := store.NewStore(dynClient, cfg.Namespace)
+	storeCtx, storeCancel := context.WithCancel(context.Background())
+	defer storeCancel()
+	go monitorStore.Run(storeCtx)
+
+	syncCtx, syncCancel := context.WithTimeout(ctx, 30*time.Second)
+	if !monitorStore.WaitForCacheSync(syncCtx) {
+		log.Fatal("timed out waiting for StreamMonitor cache to sync")
+	}
+	syncCancel()
+
 	webhookSender := webhook.NewSender(cfg.WebhookSigningKey)
-	reconciler := k8s.NewReconciler(k8sClient, repo, webhookSender, cfg.ReconcileWebhookURL, cfg.ReconcileTimeout)
+	reconciler := k8s.NewReconciler(k8sClient, monitorStore, webhookSender, cfg.ReconcileWebhookURL, cfg.ReconcileTimeout)
 
 	// Create API handler
 	handler := api.NewHandler(
-		repo,
+		monitorStore,
 		cfg.MaxMonitors,
 		reconciler,
 		cfg.InternalAPIKey,
@@ -118,7 +116,7 @@ func main() {
 	}
 
 	// Start pod failure watcher for real-time webhook notifications
-	podWatcher := k8s.NewPodWatcher(k8sClient, repo, webhookSender)
+	podWatcher := k8s.NewPodWatcher(k8sClient, monitorStore, webhookSender)
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	go podWatcher.Run(watcherCtx)
 
@@ -128,14 +126,6 @@ func main() {
 		var reconcileCtx context.Context
 		reconcileCtx, reconcileCancel = context.WithCancel(context.Background())
 		go reconciler.RunPeriodic(reconcileCtx, cfg.ReconcileInterval)
-	}
-
-	// Start periodic cleanup of stale monitors
-	var cleanupCancel context.CancelFunc
-	if cfg.CleanupInterval > 0 {
-		var cleanupCtx context.Context
-		cleanupCtx, cleanupCancel = context.WithCancel(context.Background())
-		go runCleanupLoop(cleanupCtx, repo, cfg.CleanupInterval, cfg.MonitorRetentionPeriod)
 	}
 
 	// Set Gin mode based on environment
@@ -150,7 +140,7 @@ func main() {
 
 	// Health check endpoints (no auth required)
 	router.GET("/healthz", healthzHandler())
-	router.GET("/readyz", readyzHandler(database))
+	router.GET("/readyz", readyzHandler(monitorStore))
 
 	// External API v1 (API key auth required)
 	v1 := router.Group("/api/v1")
@@ -160,7 +150,6 @@ func main() {
 		v1.GET("/monitors", httpapi.RateLimit(100, time.Minute), handler.ListMonitors)
 		v1.GET("/monitors/:monitor_id", httpapi.RateLimit(100, time.Minute), handler.GetMonitor)
 		v1.PATCH("/monitors/:monitor_id", httpapi.RateLimit(25, time.Minute), handler.PatchMonitor)
-		v1.GET("/monitors/:monitor_id/events", httpapi.RateLimit(100, time.Minute), handler.ListEvents)
 		v1.DELETE("/monitors/:monitor_id", handler.DeleteMonitor)
 	}
 
@@ -170,7 +159,6 @@ func main() {
 	{
 		internal.PUT("/monitors/:monitor_id/status", handler.UpdateMonitorStatus)
 		internal.POST("/monitors/:monitor_id/terminate", handler.TerminateMonitor)
-		internal.POST("/monitors/:monitor_id/events", handler.RecordWebhookEvent)
 	}
 
 	// Create HTTP server
@@ -204,11 +192,6 @@ func main() {
 		reconcileCancel()
 	}
 
-	// Stop periodic cleanup
-	if cleanupCancel != nil {
-		cleanupCancel()
-	}
-
 	// Graceful shutdown
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
@@ -226,40 +209,15 @@ func healthzHandler() gin.HandlerFunc {
 	}
 }
 
-func readyzHandler(database *db.DB) gin.HandlerFunc {
+func readyzHandler(monitorStore *store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := database.Health(c.Request.Context()); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready", "error": "database connection failed"})
+		readyCtx, cancel := context.WithTimeout(c.Request.Context(), time.Second)
+		defer cancel()
+		if !monitorStore.WaitForCacheSync(readyCtx) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready", "error": "StreamMonitor cache not synced"})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
-	}
-}
-
-func runCleanupLoop(ctx context.Context, repo *db.MonitorRepository, interval, retention time.Duration) {
-	log.Info("starting periodic monitor cleanup",
-		zap.Duration("interval", interval),
-		zap.Duration("retention", retention),
-	)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Info("periodic monitor cleanup stopped")
-			return
-		case <-ticker.C:
-			cutoff := time.Now().Add(-retention)
-			opCtx, opCancel := context.WithTimeout(ctx, 30*time.Second)
-			deleted, err := repo.DeleteStaleMonitors(opCtx, cutoff)
-			opCancel()
-			if err != nil {
-				log.Error("monitor cleanup failed", zap.Error(err))
-			} else if deleted > 0 {
-				log.Info("stale monitors cleaned up", zap.Int64("deleted", deleted))
-			}
-		}
 	}
 }
 
