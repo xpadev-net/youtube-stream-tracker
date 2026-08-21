@@ -1,11 +1,15 @@
-package db
+// Package model defines the pure domain types shared by the Gateway and
+// Worker processes. These types have no dependency on how a monitor is
+// stored (previously Postgres, now the StreamMonitor Kubernetes custom
+// resource) — see internal/k8s/store for the store that persists them.
+package model
 
 import (
 	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // MonitorStatus represents the status of a monitor.
@@ -15,6 +19,7 @@ const (
 	StatusInitializing MonitorStatus = "initializing"
 	StatusWaiting      MonitorStatus = "waiting"
 	StatusMonitoring   MonitorStatus = "monitoring"
+	StatusScheduled    MonitorStatus = "scheduled"
 	StatusCompleted    MonitorStatus = "completed"
 	StatusStopped      MonitorStatus = "stopped"
 	StatusError        MonitorStatus = "error"
@@ -24,16 +29,6 @@ const (
 func (s MonitorStatus) IsActive() bool {
 	return s == StatusInitializing || s == StatusWaiting || s == StatusMonitoring
 }
-
-// WebhookStatus represents the status of a webhook delivery.
-type WebhookStatus string
-
-const (
-	WebhookStatusPending WebhookStatus = "pending"
-	WebhookStatusSent    WebhookStatus = "sent"
-	WebhookStatusFailed  WebhookStatus = "failed"
-	WebhookStatusSkipped WebhookStatus = "skipped" // no callback URL configured; nothing to deliver
-)
 
 // HealthStatus represents health status of video/audio.
 type HealthStatus string
@@ -65,7 +60,7 @@ type MonitorConfig struct {
 	StartDelayToleranceSec int        `json:"start_delay_tolerance_sec"`
 }
 
-// ValidateMonitorConfig validates that config values are within acceptable ranges.
+// Validate validates that config values are within acceptable ranges.
 func (c MonitorConfig) Validate() error {
 	if c.CheckIntervalSec <= 0 {
 		return fmt.Errorf("check_interval_sec must be greater than 0")
@@ -99,6 +94,7 @@ func DefaultMonitorConfig() MonitorConfig {
 // Monitor represents a monitoring job.
 type Monitor struct {
 	ID          string          `json:"id"`
+	UID         types.UID       `json:"-"`
 	StreamURL   string          `json:"stream_url"`
 	CallbackURL string          `json:"callback_url"`
 	Config      MonitorConfig   `json:"config"`
@@ -106,7 +102,20 @@ type Monitor struct {
 	Status      MonitorStatus   `json:"status"`
 	PodName     *string         `json:"pod_name,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	// UpdatedAt currently always equals CreatedAt: internal/k8s/store's
+	// conversion from a StreamMonitor object populates both from
+	// metadata.creationTimestamp, because the StreamMonitor CRD schema (see
+	// helm/stream-monitor/crds/streammonitor-crd.yaml) has no field
+	// tracking a live last-modified time the way the old Postgres
+	// `monitors.updated_at` column did — the built-in metadata.
+	// resourceVersion changes on every write but is an opaque string, not
+	// a timestamp. No API response currently serializes this field. If a
+	// real update timestamp is needed later, add a status field (e.g.
+	// `status.lastUpdatedAt`) to the CRD and set it on every status/spec
+	// write path in internal/k8s/store, keeping in mind that changing the
+	// CRD schema requires a manual `kubectl apply` on already-installed
+	// clusters (Helm's crds/ directory is not touched by `helm upgrade`).
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // MonitorStats represents monitoring statistics.
@@ -119,19 +128,6 @@ type MonitorStats struct {
 	VideoHealth    HealthStatus `json:"video_health"`
 	AudioHealth    HealthStatus `json:"audio_health"`
 	StreamStatus   StreamStatus `json:"stream_status"`
-}
-
-// MonitorEvent represents an event that occurred during monitoring.
-type MonitorEvent struct {
-	ID               uuid.UUID       `json:"id"`
-	MonitorID        string          `json:"monitor_id"`
-	EventType        string          `json:"event_type"`
-	Payload          json.RawMessage `json:"payload"`
-	WebhookStatus    WebhookStatus   `json:"webhook_status"`
-	WebhookAttempts  int             `json:"webhook_attempts"`
-	WebhookLastError *string         `json:"webhook_last_error,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
-	SentAt           *time.Time      `json:"sent_at,omitempty"`
 }
 
 // MonitorWithStats combines monitor and its stats for API responses.

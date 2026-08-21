@@ -14,42 +14,43 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/httpapi"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/ids"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/k8s"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/k8s/store"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/validation"
 )
 
 var youtubeWatchURLRegex = regexp.MustCompile(`^https?://(www\.)?youtube\.com/watch\?v=[a-zA-Z0-9_-]{11}`)
 
-var validMonitorStatuses = map[db.MonitorStatus]bool{
-	db.StatusInitializing: true,
-	db.StatusWaiting:      true,
-	db.StatusMonitoring:   true,
-	db.StatusCompleted:    true,
-	db.StatusStopped:      true,
-	db.StatusError:        true,
+var validMonitorStatuses = map[model.MonitorStatus]bool{
+	model.StatusInitializing: true,
+	model.StatusWaiting:      true,
+	model.StatusMonitoring:   true,
+	model.StatusCompleted:    true,
+	model.StatusStopped:      true,
+	model.StatusError:        true,
 }
 
-var validStreamStatuses = map[db.StreamStatus]bool{
-	db.StreamStatusUnknown:   true,
-	db.StreamStatusScheduled: true,
-	db.StreamStatusLive:      true,
-	db.StreamStatusEnded:     true,
+var validStreamStatuses = map[model.StreamStatus]bool{
+	model.StreamStatusUnknown:   true,
+	model.StreamStatusScheduled: true,
+	model.StreamStatusLive:      true,
+	model.StreamStatusEnded:     true,
 }
 
-var validHealthStatuses = map[db.HealthStatus]bool{
-	db.HealthOK:      true,
-	db.HealthWarning: true,
-	db.HealthError:   true,
-	db.HealthUnknown: true,
+var validHealthStatuses = map[model.HealthStatus]bool{
+	model.HealthOK:      true,
+	model.HealthWarning: true,
+	model.HealthError:   true,
+	model.HealthUnknown: true,
 }
 
 // Handler holds dependencies for API handlers.
 type Handler struct {
-	repo                       *db.MonitorRepository
+	repo                       *store.Store
 	maxMonitors                int
 	reconciler                 *k8s.Reconciler
 	internalAPIKey             string
@@ -60,7 +61,7 @@ type Handler struct {
 }
 
 // NewHandler creates a new API handler.
-func NewHandler(repo *db.MonitorRepository, maxMonitors int, reconciler *k8s.Reconciler, internalAPIKey, webhookSigningKey, secretsName, internalAPIKeySecretKey, webhookSigningKeySecretKey string) *Handler {
+func NewHandler(repo *store.Store, maxMonitors int, reconciler *k8s.Reconciler, internalAPIKey, webhookSigningKey, secretsName, internalAPIKeySecretKey, webhookSigningKeySecretKey string) *Handler {
 	return &Handler{
 		repo:                       repo,
 		maxMonitors:                maxMonitors,
@@ -137,7 +138,7 @@ func (h *Handler) CreateMonitor(c *gin.Context) {
 	}
 
 	// Build config
-	config := applyConfigOverrides(db.DefaultMonitorConfig(), req.Config)
+	config := applyConfigOverrides(model.DefaultMonitorConfig(), req.Config)
 	if err := config.Validate(); err != nil {
 		httpapi.RespondError(c, http.StatusBadRequest, httpapi.ErrCodeInvalidConfig, err.Error())
 		return
@@ -151,15 +152,16 @@ func (h *Handler) CreateMonitor(c *gin.Context) {
 
 	// Create monitor
 	monitorID := ids.NewMonitorID()
-	monitor, err := h.repo.Create(c.Request.Context(), db.CreateMonitorParams{
-		ID:          monitorID,
-		StreamURL:   req.StreamURL,
-		CallbackURL: req.CallbackURL,
-		Config:      config,
-		Metadata:    metadata,
+	monitor, err := h.repo.Create(c.Request.Context(), store.CreateMonitorParams{
+		ID:           monitorID,
+		StreamURL:    req.StreamURL,
+		CallbackURL:  req.CallbackURL,
+		Config:       config,
+		Metadata:     metadata,
+		InitialPhase: model.StatusInitializing,
 	})
 	if err != nil {
-		if errors.Is(err, db.ErrDuplicateMonitor) {
+		if errors.Is(err, store.ErrDuplicateMonitor) {
 			httpapi.RespondConflict(c, httpapi.ErrCodeDuplicateMonitor,
 				"A monitor for this stream URL already exists")
 			return
@@ -176,14 +178,14 @@ func (h *Handler) CreateMonitor(c *gin.Context) {
 
 	if h.reconciler == nil {
 		log.Error("k8s reconciler not configured")
-		_ = h.repo.UpdateStatus(c.Request.Context(), monitor.ID, db.StatusError)
+		_ = h.repo.UpdateStatus(c.Request.Context(), monitor.ID, model.StatusError)
 		httpapi.RespondInternalError(c, "Failed to start worker pod")
 		return
 	}
 
 	if err := h.reconciler.CreateMonitorPod(c.Request.Context(), monitor, h.internalAPIKey, h.webhookSigningKey, h.secretsName, h.internalAPIKeySecretKey, h.webhookSigningKeySecretKey); err != nil {
 		log.Error("failed to create worker pod", zap.Error(err))
-		_ = h.repo.UpdateStatus(c.Request.Context(), monitor.ID, db.StatusError)
+		_ = h.repo.UpdateStatus(c.Request.Context(), monitor.ID, model.StatusError)
 		httpapi.RespondInternalError(c, "Failed to start worker pod")
 		return
 	}
@@ -230,7 +232,7 @@ func (h *Handler) GetMonitor(c *gin.Context) {
 
 	monitorWithStats, err := h.repo.GetWithStats(c.Request.Context(), monitorID)
 	if err != nil {
-		if errors.Is(err, db.ErrMonitorNotFound) {
+		if errors.Is(err, store.ErrMonitorNotFound) {
 			httpapi.RespondNotFound(c, "Monitor not found")
 			return
 		}
@@ -280,12 +282,14 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 		return
 	}
 
-	// Delete the monitor record from the database first.
+	// Delete the StreamMonitor object first.
 	// Pod cleanup is best-effort afterward — the periodic reconciler
-	// handles orphaned pods (pods with no DB record), so this ordering
-	// is consistent with TerminateMonitor and avoids ghost DB records.
+	// handles orphaned pods (pods with no StreamMonitor), so this ordering
+	// is consistent with TerminateMonitor and avoids ghost records.
+	// Kubernetes' own garbage collector also deletes the Pod automatically
+	// via its ownerReferences, as a backstop.
 	if err := h.repo.Delete(c.Request.Context(), monitorID); err != nil {
-		if errors.Is(err, db.ErrMonitorNotFound) {
+		if errors.Is(err, store.ErrMonitorNotFound) {
 			httpapi.RespondNotFound(c, "Monitor not found")
 			return
 		}
@@ -295,12 +299,12 @@ func (h *Handler) DeleteMonitor(c *gin.Context) {
 	}
 
 	log.Info("monitor deleted", zap.String("monitor_id", monitorID))
-	deletedAt := time.Now() // capture timestamp right after DB deletion
+	deletedAt := time.Now() // capture timestamp right after deletion
 
 	// Best-effort pod cleanup; periodic reconciler will catch any stragglers.
 	if h.reconciler != nil {
 		if err := h.reconciler.DeleteMonitorPod(c.Request.Context(), monitorID); err != nil {
-			log.Error("failed to delete worker pod after DB deletion; periodic reconciler will clean up",
+			log.Error("failed to delete worker pod after deletion; periodic reconciler will clean up",
 				zap.String("monitor_id", monitorID),
 				zap.Error(err),
 			)
@@ -340,10 +344,10 @@ type PaginationInfo struct {
 // ListMonitors handles GET /api/v1/monitors
 func (h *Handler) ListMonitors(c *gin.Context) {
 	// Parse query parameters
-	var params db.ListParams
+	var params store.ListParams
 
 	if status := c.Query("status"); status != "" {
-		s := db.MonitorStatus(status)
+		s := model.MonitorStatus(status)
 		if !validMonitorStatuses[s] {
 			httpapi.RespondValidationError(c, "Invalid status value")
 			return
@@ -358,9 +362,12 @@ func (h *Handler) ListMonitors(c *gin.Context) {
 	}
 
 	if offsetStr := c.Query("offset"); offsetStr != "" {
-		if offset, err := strconv.Atoi(offsetStr); err == nil {
-			params.Offset = offset
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil || offset < 0 {
+			httpapi.RespondValidationError(c, "Invalid offset value")
+			return
 		}
+		params.Offset = offset
 	}
 
 	monitors, total, err := h.repo.List(c.Request.Context(), params)
@@ -430,15 +437,15 @@ func (h *Handler) UpdateMonitorStatus(c *gin.Context) {
 	}
 
 	// Validate status
-	status := db.MonitorStatus(req.Status)
+	status := model.MonitorStatus(req.Status)
 	if !validMonitorStatuses[status] {
 		httpapi.RespondValidationError(c, "Invalid status value")
 		return
 	}
 
-	// Pre-validate incoming enum-like fields before any DB operations to avoid partial writes
+	// Pre-validate incoming enum-like fields before any writes to avoid partial updates
 	if req.StreamStatus != "" {
-		ss := db.StreamStatus(req.StreamStatus)
+		ss := model.StreamStatus(req.StreamStatus)
 		if !validStreamStatuses[ss] {
 			httpapi.RespondValidationError(c, "invalid stream_status: "+req.StreamStatus)
 			return
@@ -446,14 +453,14 @@ func (h *Handler) UpdateMonitorStatus(c *gin.Context) {
 	}
 	if req.Health != nil {
 		if req.Health.Video != "" {
-			vh := db.HealthStatus(req.Health.Video)
+			vh := model.HealthStatus(req.Health.Video)
 			if !validHealthStatuses[vh] {
 				httpapi.RespondValidationError(c, "invalid health.video: "+req.Health.Video)
 				return
 			}
 		}
 		if req.Health.Audio != "" {
-			ah := db.HealthStatus(req.Health.Audio)
+			ah := model.HealthStatus(req.Health.Audio)
 			if !validHealthStatuses[ah] {
 				httpapi.RespondValidationError(c, "invalid health.audio: "+req.Health.Audio)
 				return
@@ -463,7 +470,7 @@ func (h *Handler) UpdateMonitorStatus(c *gin.Context) {
 
 	// Update monitor status
 	if err := h.repo.UpdateStatus(c.Request.Context(), monitorID, status); err != nil {
-		if errors.Is(err, db.ErrMonitorNotFound) {
+		if errors.Is(err, store.ErrMonitorNotFound) {
 			httpapi.RespondNotFound(c, "Monitor not found")
 			return
 		}
@@ -474,23 +481,23 @@ func (h *Handler) UpdateMonitorStatus(c *gin.Context) {
 
 	// Update stats if provided
 	if req.Health != nil || req.Statistics != nil || req.StreamStatus != "" {
-		stats, err := h.repo.GetStats(c.Request.Context(), monitorID)
+		withStats, err := h.repo.GetWithStats(c.Request.Context(), monitorID)
 		if err != nil {
 			log.Error("failed to get monitor stats", zap.Error(err))
-		} else if stats != nil {
+		} else if withStats.Stats != nil {
+			stats := withStats.Stats
 			now := time.Now()
 			stats.LastCheckAt = &now
 
-			// Validate stream_status
 			if req.StreamStatus != "" {
-				stats.StreamStatus = db.StreamStatus(req.StreamStatus)
+				stats.StreamStatus = model.StreamStatus(req.StreamStatus)
 			}
 			if req.Health != nil {
 				if req.Health.Video != "" {
-					stats.VideoHealth = db.HealthStatus(req.Health.Video)
+					stats.VideoHealth = model.HealthStatus(req.Health.Video)
 				}
 				if req.Health.Audio != "" {
-					stats.AudioHealth = db.HealthStatus(req.Health.Audio)
+					stats.AudioHealth = model.HealthStatus(req.Health.Audio)
 				}
 			}
 			if req.Statistics != nil {
@@ -537,7 +544,7 @@ func (h *Handler) TerminateMonitor(c *gin.Context) {
 	}
 
 	if err := h.repo.Delete(c.Request.Context(), monitorID); err != nil {
-		if errors.Is(err, db.ErrMonitorNotFound) {
+		if errors.Is(err, store.ErrMonitorNotFound) {
 			log.Info("monitor already deleted",
 				zap.String("monitor_id", monitorID),
 				zap.String("reason", req.Reason),
@@ -581,80 +588,9 @@ func (h *Handler) TerminateMonitor(c *gin.Context) {
 	})
 }
 
-// RecordWebhookEventRequest represents the request body for recording a webhook event (internal API).
-type RecordWebhookEventRequest struct {
-	EventType       string                 `json:"event_type" binding:"required"`
-	WebhookStatus   string                 `json:"webhook_status" binding:"required"`
-	WebhookAttempts int                    `json:"webhook_attempts"`
-	WebhookError    *string                `json:"webhook_error,omitempty"`
-	Payload         map[string]interface{} `json:"payload,omitempty"`
-}
-
-// RecordWebhookEvent handles POST /internal/v1/monitors/:monitor_id/events
-func (h *Handler) RecordWebhookEvent(c *gin.Context) {
-	monitorID := c.Param("monitor_id")
-	if !ids.IsValidMonitorID(monitorID) {
-		httpapi.RespondNotFound(c, "Monitor not found")
-		return
-	}
-
-	var req RecordWebhookEventRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		httpapi.RespondValidationError(c, "Invalid request body: "+err.Error())
-		return
-	}
-
-	// Validate webhook_status
-	whStatus := db.WebhookStatus(req.WebhookStatus)
-	if whStatus != db.WebhookStatusPending && whStatus != db.WebhookStatusSent && whStatus != db.WebhookStatusFailed {
-		httpapi.RespondValidationError(c, "invalid webhook_status: "+req.WebhookStatus)
-		return
-	}
-
-	// Build payload JSON
-	var payloadJSON json.RawMessage
-	if req.Payload != nil {
-		b, err := json.Marshal(req.Payload)
-		if err != nil {
-			httpapi.RespondValidationError(c, "failed to encode payload")
-			return
-		}
-		payloadJSON = b
-	} else {
-		payloadJSON = json.RawMessage("{}")
-	}
-
-	var sentAt *time.Time
-	if whStatus == db.WebhookStatusSent {
-		now := time.Now()
-		sentAt = &now
-	}
-
-	event := &db.MonitorEvent{
-		MonitorID:        monitorID,
-		EventType:        req.EventType,
-		Payload:          payloadJSON,
-		WebhookStatus:    whStatus,
-		WebhookAttempts:  req.WebhookAttempts,
-		WebhookLastError: req.WebhookError,
-		SentAt:           sentAt,
-	}
-
-	if err := h.repo.CreateEvent(c.Request.Context(), event); err != nil {
-		log.Error("failed to create webhook event", zap.Error(err))
-		httpapi.RespondInternalError(c, "Failed to record webhook event")
-		return
-	}
-
-	httpapi.RespondCreated(c, gin.H{
-		"event_id":   event.ID.String(),
-		"monitor_id": monitorID,
-	})
-}
-
 // PatchMonitorRequest represents the request body for updating a monitor.
 type PatchMonitorRequest struct {
-	CallbackURL *string              `json:"callback_url,omitempty"`
+	CallbackURL *string               `json:"callback_url,omitempty"`
 	Config      *MonitorConfigRequest `json:"config,omitempty"`
 }
 
@@ -691,7 +627,7 @@ func (h *Handler) PatchMonitor(c *gin.Context) {
 	}
 
 	// Build update params
-	params := db.UpdateMonitorParams{
+	params := store.UpdateMonitorParams{
 		CallbackURL: req.CallbackURL,
 	}
 
@@ -699,7 +635,7 @@ func (h *Handler) PatchMonitor(c *gin.Context) {
 	if req.Config != nil {
 		existing, err := h.repo.GetByID(c.Request.Context(), monitorID)
 		if err != nil {
-			if errors.Is(err, db.ErrMonitorNotFound) {
+			if errors.Is(err, store.ErrMonitorNotFound) {
 				httpapi.RespondNotFound(c, "Monitor not found")
 				return
 			}
@@ -717,11 +653,11 @@ func (h *Handler) PatchMonitor(c *gin.Context) {
 
 	updated, err := h.repo.UpdateMonitor(c.Request.Context(), monitorID, params)
 	if err != nil {
-		if errors.Is(err, db.ErrMonitorNotFound) {
+		if errors.Is(err, store.ErrMonitorNotFound) {
 			httpapi.RespondNotFound(c, "Monitor not found")
 			return
 		}
-		if errors.Is(err, db.ErrMonitorNotActive) {
+		if errors.Is(err, store.ErrMonitorNotActive) {
 			httpapi.RespondConflict(c, httpapi.ErrCodeMonitorNotActive,
 				"Monitor is not in an active state and cannot be updated")
 			return
@@ -743,94 +679,7 @@ func (h *Handler) PatchMonitor(c *gin.Context) {
 	})
 }
 
-// ListEventsResponse represents the response for listing events.
-type ListEventsResponse struct {
-	Events     []EventSummary `json:"events"`
-	Pagination PaginationInfo `json:"pagination"`
-}
-
-// EventSummary represents an event in the list response.
-type EventSummary struct {
-	EventID       string  `json:"event_id"`
-	MonitorID     string  `json:"monitor_id"`
-	EventType     string  `json:"event_type"`
-	WebhookStatus string  `json:"webhook_status"`
-	CreatedAt     string  `json:"created_at"`
-	SentAt        *string `json:"sent_at,omitempty"`
-}
-
-// ListEvents handles GET /api/v1/monitors/:monitor_id/events
-func (h *Handler) ListEvents(c *gin.Context) {
-	monitorID := c.Param("monitor_id")
-	if !ids.IsValidMonitorID(monitorID) {
-		httpapi.RespondNotFound(c, "Monitor not found")
-		return
-	}
-
-	// Check monitor exists
-	_, err := h.repo.GetByID(c.Request.Context(), monitorID)
-	if err != nil {
-		if errors.Is(err, db.ErrMonitorNotFound) {
-			httpapi.RespondNotFound(c, "Monitor not found")
-			return
-		}
-		log.Error("failed to get monitor", zap.Error(err))
-		httpapi.RespondInternalError(c, "Failed to get monitor")
-		return
-	}
-
-	// Parse query parameters
-	var params db.ListEventsParams
-
-	params.Limit = 50
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if parsed, err := strconv.Atoi(limitStr); err == nil {
-			params.Limit = min(max(parsed, 0), 100)
-		}
-	}
-	if params.Limit == 0 {
-		params.Limit = 50
-	}
-
-	if offsetStr := c.Query("offset"); offsetStr != "" {
-		if parsed, err := strconv.Atoi(offsetStr); err == nil {
-			params.Offset = max(parsed, 0)
-		}
-	}
-
-	events, total, err := h.repo.ListEvents(c.Request.Context(), monitorID, params)
-	if err != nil {
-		log.Error("failed to list events", zap.Error(err))
-		httpapi.RespondInternalError(c, "Failed to list events")
-		return
-	}
-
-	summaries := make([]EventSummary, len(events))
-	for i, e := range events {
-		summaries[i] = EventSummary{
-			EventID:       e.ID.String(),
-			MonitorID:     e.MonitorID,
-			EventType:     e.EventType,
-			WebhookStatus: string(e.WebhookStatus),
-			CreatedAt:     e.CreatedAt.Format(time.RFC3339),
-		}
-		if e.SentAt != nil {
-			sentAt := e.SentAt.Format(time.RFC3339)
-			summaries[i].SentAt = &sentAt
-		}
-	}
-
-	httpapi.RespondOK(c, ListEventsResponse{
-		Events: summaries,
-		Pagination: PaginationInfo{
-			Total:  total,
-			Limit:  params.Limit,
-			Offset: params.Offset,
-		},
-	})
-}
-
-func applyConfigOverrides(base db.MonitorConfig, overrides *MonitorConfigRequest) db.MonitorConfig {
+func applyConfigOverrides(base model.MonitorConfig, overrides *MonitorConfigRequest) model.MonitorConfig {
 	if overrides == nil {
 		return base
 	}

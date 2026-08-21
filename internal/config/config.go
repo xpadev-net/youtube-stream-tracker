@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
 )
 
 // GatewayConfig holds configuration for the API Gateway.
@@ -15,9 +15,6 @@ type GatewayConfig struct {
 	// Server settings
 	Port        int
 	Environment string
-
-	// Database
-	DatabaseURL string
 
 	// API Keys
 	APIKey                            string
@@ -39,10 +36,6 @@ type GatewayConfig struct {
 	ReconcileOnBoot   bool
 	ReconcileTimeout  time.Duration
 	ReconcileInterval time.Duration
-
-	// Cleanup
-	MonitorRetentionPeriod time.Duration
-	CleanupInterval        time.Duration
 
 	// Timeouts
 	ReadTimeout     time.Duration
@@ -96,12 +89,10 @@ type WorkerConfig struct {
 
 // LoadGatewayConfig loads the gateway configuration from environment variables.
 func LoadGatewayConfig() (*GatewayConfig, error) {
-	databaseURL := getEnvWithFallback("DB_DSN", "DATABASE_URL", "")
 	reconcileTimeout := getEnvDurationWithFallback("GATEWAY_RECONCILE_TIMEOUT", "RECONCILE_TIMEOUT", 30*time.Second)
 	cfg := &GatewayConfig{
 		Port:                              getEnvInt("PORT", 8080),
 		Environment:                       getEnv("ENVIRONMENT", "development"),
-		DatabaseURL:                       databaseURL,
 		APIKey:                            getEnv("API_KEY", ""),
 		InternalAPIKey:                    getEnv("INTERNAL_API_KEY", ""),
 		WebhookSigningKey:                 getEnv("WEBHOOK_SIGNING_KEY", ""),
@@ -119,16 +110,11 @@ func LoadGatewayConfig() (*GatewayConfig, error) {
 		ReconcileOnBoot:                   getEnvBool("RECONCILE_ON_BOOT", true),
 		ReconcileTimeout:                  reconcileTimeout,
 		ReconcileInterval:                 getEnvDuration("RECONCILE_INTERVAL", 5*time.Minute),
-		MonitorRetentionPeriod:            getEnvDuration("MONITOR_RETENTION_PERIOD", 168*time.Hour),
-		CleanupInterval:                   getEnvDuration("CLEANUP_INTERVAL", time.Hour),
 		ReadTimeout:                       getEnvDuration("READ_TIMEOUT", 30*time.Second),
 		WriteTimeout:                      getEnvDuration("WRITE_TIMEOUT", 30*time.Second),
 		ShutdownTimeout:                   getEnvDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
 	}
 
-	if cfg.DatabaseURL == "" {
-		return nil, fmt.Errorf("DB_DSN or DATABASE_URL is required")
-	}
 	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("API_KEY is required")
 	}
@@ -167,12 +153,12 @@ func LoadWorkerConfig() (*WorkerConfig, error) {
 		AnalysisInterval:           getEnvDuration("ANALYSIS_INTERVAL", 10*time.Second),
 		BlackoutThreshold:          getEnvDuration("BLACKOUT_THRESHOLD", 5*time.Second),
 		SilenceThreshold:           getEnvDuration("SILENCE_THRESHOLD", 5*time.Second),
-		SilenceDBThreshold:         db.DefaultMonitorConfig().SilenceDBThreshold,
+		SilenceDBThreshold:         model.DefaultMonitorConfig().SilenceDBThreshold,
 		DelayThreshold:             getEnvDuration("DELAY_THRESHOLD", 300*time.Second),
 	}
 
 	if configJSON := os.Getenv("CONFIG_JSON"); configJSON != "" {
-		var monitorConfig db.MonitorConfig
+		var monitorConfig model.MonitorConfig
 		if err := json.Unmarshal([]byte(configJSON), &monitorConfig); err != nil {
 			return nil, fmt.Errorf("parse CONFIG_JSON: %w", err)
 		}
@@ -232,16 +218,6 @@ func LoadWorkerConfig() (*WorkerConfig, error) {
 
 func getEnv(key, defaultValue string) string {
 	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return defaultValue
-}
-
-func getEnvWithFallback(primaryKey, fallbackKey, defaultValue string) string {
-	if v := os.Getenv(primaryKey); v != "" {
-		return v
-	}
-	if v := os.Getenv(fallbackKey); v != "" {
 		return v
 	}
 	return defaultValue

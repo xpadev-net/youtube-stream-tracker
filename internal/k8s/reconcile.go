@@ -2,19 +2,17 @@ package k8s
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
 
 	"go.uber.org/zap"
 
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/k8s/store"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/webhook"
 )
-
-const auditWriteTimeout = 10 * time.Second
 
 // redactURL returns scheme://host/path, stripping query params, fragments, and userinfo.
 func redactURL(raw string) string {
@@ -39,17 +37,17 @@ type ReconcileResult struct {
 	TimedOut     bool
 }
 
-// Reconciler handles reconciliation between DB and K8s state.
+// Reconciler handles reconciliation between the StreamMonitor store and K8s state.
 type Reconciler struct {
 	k8sClient                *Client
-	repo                     *db.MonitorRepository
+	repo                     *store.Store
 	webhookSender            *webhook.Sender
 	reconciliationWebhookURL string
 	timeout                  time.Duration
 }
 
 // NewReconciler creates a new reconciler.
-func NewReconciler(k8sClient *Client, repo *db.MonitorRepository, webhookSender *webhook.Sender, reconciliationWebhookURL string, timeout time.Duration) *Reconciler {
+func NewReconciler(k8sClient *Client, repo *store.Store, webhookSender *webhook.Sender, reconciliationWebhookURL string, timeout time.Duration) *Reconciler {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
@@ -106,7 +104,7 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 		zap.Duration("timeout", r.timeout),
 	)
 
-	// Get snapshot of DB state (all active monitors)
+	// Get snapshot of store state (all active monitors)
 	activeMonitors, err := r.repo.GetActiveMonitors(reconcileCtx)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("get active monitors: %v", err))
@@ -123,9 +121,9 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 	}
 
 	// Build maps for quick lookup
-	dbMonitors := make(map[string]*db.Monitor)
+	storeMonitors := make(map[string]*model.Monitor)
 	for _, m := range activeMonitors {
-		dbMonitors[m.ID] = m
+		storeMonitors[m.ID] = m
 	}
 
 	podMonitors := make(map[string]bool)
@@ -145,8 +143,8 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 	default:
 	}
 
-	// Find missing pods: monitors in DB but no pod
-	for monitorID, monitor := range dbMonitors {
+	// Find missing pods: monitors in the store but no pod
+	for monitorID, monitor := range storeMonitors {
 		if !podMonitors[monitorID] {
 			result.MissingPods++
 			log.Warn("missing pod for active monitor",
@@ -159,7 +157,7 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 				reconcileCtx,
 				monitorID,
 				monitor.Status,
-				db.StatusError,
+				model.StatusError,
 			)
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("update status for %s: %v", monitorID, err))
@@ -180,9 +178,9 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 			continue
 		}
 
-		monitor, exists := dbMonitors[monitorID]
+		monitor, exists := storeMonitors[monitorID]
 		if !exists {
-			// Orphaned pod: no corresponding monitor in DB
+			// Orphaned pod: no corresponding monitor in the store
 			result.OrphanedPods++
 			log.Warn("orphaned pod found",
 				zap.String("pod_name", p.Name),
@@ -197,7 +195,7 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 		}
 
 		// Check for zombie pods (status is stopped or error, but pod exists)
-		if monitor.Status == db.StatusStopped || monitor.Status == db.StatusError || monitor.Status == db.StatusCompleted {
+		if monitor.Status == model.StatusStopped || monitor.Status == model.StatusError || monitor.Status == model.StatusCompleted {
 			result.ZombiePods++
 			log.Warn("zombie pod found",
 				zap.String("pod_name", p.Name),
@@ -226,8 +224,9 @@ func (r *Reconciler) ReconcileStartup(ctx context.Context) (*ReconcileResult, er
 }
 
 // sendErrorWebhook sends a monitor.error webhook to both the operator URL
-// and the monitor's registered callback URL, and records the event in the DB.
-func (r *Reconciler) sendErrorWebhook(monitor *db.Monitor, reason, message string) {
+// and the monitor's registered callback URL. Delivery outcome is only
+// logged locally (via zap) — there is no audit-log store anymore.
+func (r *Reconciler) sendErrorWebhook(monitor *model.Monitor, reason, message string) {
 	data := map[string]interface{}{
 		"reason":                reason,
 		"reconciliation_action": "mark_as_error_missing_pod",
@@ -264,108 +263,32 @@ func (r *Reconciler) sendErrorWebhook(monitor *db.Monitor, reason, message strin
 		}()
 	}
 
-	// Record event in DB for audit trail (regardless of callback URL or webhookSender)
-	payloadJSON, err := json.Marshal(data)
-	if err != nil {
-		log.Warn("failed to marshal reconciliation error webhook payload",
-			zap.String("monitor_id", monitor.ID),
-			zap.Error(err),
-		)
-	}
-
-	willSendCallback := r.webhookSender != nil && monitor.CallbackURL != ""
-
-	event := &db.MonitorEvent{
-		MonitorID:     monitor.ID,
-		EventType:     string(webhook.EventMonitorError),
-		Payload:       payloadJSON,
-		WebhookStatus: db.WebhookStatusPending,
-		CreatedAt:     time.Now(),
-	}
-
-	if !willSendCallback {
-		if monitor.CallbackURL != "" {
-			// Callback URL exists but no sender configured
-			event.WebhookStatus = db.WebhookStatusFailed
-			errMsg := "no webhook sender available"
-			event.WebhookLastError = &errMsg
-		} else {
-			// No callback URL — nothing to deliver
-			event.WebhookStatus = db.WebhookStatusSkipped
-		}
-	}
-
-	auditCtx, auditCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
-	defer auditCancel()
-
-	eventPersisted := true
-	if err := r.repo.CreateEvent(auditCtx, event); err != nil {
-		log.Warn("failed to record reconciliation error event",
-			zap.String("monitor_id", monitor.ID),
-			zap.Error(err),
-		)
-		eventPersisted = false
-	}
-
-	if !willSendCallback {
+	if r.webhookSender == nil || monitor.CallbackURL == "" {
 		return
 	}
 
-	// Send webhook and update event status
+	// Send webhook to the monitor's callback URL
 	go func() {
 		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		result := r.webhookSender.Send(sendCtx, monitor.CallbackURL, payload)
-
-		whStatus := db.WebhookStatusSent
-		var whError *string
-		var sentAt *time.Time
 		if result.Success {
-			now := time.Now()
-			sentAt = &now
+			log.Info("reconciliation error webhook delivered",
+				zap.String("monitor_id", monitor.ID),
+			)
 		} else {
-			whStatus = db.WebhookStatusFailed
-			whError = &result.Error
 			log.Warn("failed to send reconciliation error webhook to callback URL",
 				zap.String("monitor_id", monitor.ID),
 				zap.String("callback_url", redactURL(monitor.CallbackURL)),
 				zap.String("error", result.Error),
 			)
 		}
-
-		if !eventPersisted {
-			// Initial CreateEvent failed; retry with upsert to handle ambiguous timeouts
-			// where the row may have been committed despite the error.
-			event.WebhookStatus = whStatus
-			event.WebhookAttempts = result.Attempts
-			event.WebhookLastError = whError
-			event.SentAt = sentAt
-			retryCtx, retryCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
-			if err := r.repo.UpsertEvent(retryCtx, event); err != nil {
-				log.Warn("retry: failed to upsert reconciliation error event",
-					zap.String("monitor_id", monitor.ID),
-					zap.Error(err),
-				)
-			}
-			retryCancel()
-			return
-		}
-
-		updateCtx, updateCancel := context.WithTimeout(context.Background(), auditWriteTimeout)
-		defer updateCancel()
-
-		if err := r.repo.UpdateEventWebhookStatus(updateCtx, event.ID, whStatus, result.Attempts, whError, sentAt); err != nil {
-			log.Warn("failed to update reconciliation error event status",
-				zap.String("monitor_id", monitor.ID),
-				zap.Error(err),
-			)
-		}
 	}()
 }
 
-// CreateMonitorPod creates a pod for a monitor and updates the pod_name in DB.
-func (r *Reconciler) CreateMonitorPod(ctx context.Context, monitor *db.Monitor, internalAPIKey, webhookSigningKey, secretsName, internalKey, signingKey string) error {
+// CreateMonitorPod creates a pod for a monitor and updates its podName status.
+func (r *Reconciler) CreateMonitorPod(ctx context.Context, monitor *model.Monitor, internalAPIKey, webhookSigningKey, secretsName, internalKey, signingKey string) error {
 	gatewayBaseURL, err := r.k8sClient.GetGatewayInternalBaseURL(ctx)
 	if err != nil {
 		return fmt.Errorf("get gateway internal base URL: %w", err)
@@ -383,6 +306,8 @@ func (r *Reconciler) CreateMonitorPod(ctx context.Context, monitor *db.Monitor, 
 		SecretsName:           secretsName,
 		InternalAPIKeyName:    internalKey,
 		WebhookSigningKeyName: signingKey,
+		OwnerUID:              monitor.UID,
+		OwnerName:             monitor.ID,
 	}
 
 	pod, err := r.k8sClient.CreateWorkerPod(ctx, params)
@@ -390,9 +315,9 @@ func (r *Reconciler) CreateMonitorPod(ctx context.Context, monitor *db.Monitor, 
 		return fmt.Errorf("create worker pod: %w", err)
 	}
 
-	// Update pod_name in DB
+	// Update podName status
 	if err := r.repo.UpdatePodName(ctx, monitor.ID, pod.Name); err != nil {
-		log.Error("failed to update pod_name in DB",
+		log.Error("failed to update podName status",
 			zap.String("monitor_id", monitor.ID),
 			zap.Error(err),
 		)

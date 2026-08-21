@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/xpadev-net/youtube-stream-tracker/internal/config"
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/ffmpeg"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/manifest"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/webhook"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/ytdlp"
 )
@@ -52,17 +52,13 @@ type spyCallbackClient struct {
 	terminateReason string
 }
 
-func (s *spyCallbackClient) ReportStatus(ctx context.Context, monitorID string, status db.MonitorStatus, update *StatusUpdate) error {
+func (s *spyCallbackClient) ReportStatus(ctx context.Context, monitorID string, status model.MonitorStatus, update *StatusUpdate) error {
 	return nil
 }
 
 func (s *spyCallbackClient) TerminateMonitor(ctx context.Context, monitorID string, reason string) error {
 	s.terminateCalled = true
 	s.terminateReason = reason
-	return nil
-}
-
-func (s *spyCallbackClient) ReportWebhookEvent(ctx context.Context, monitorID string, event *WebhookEventReport) error {
 	return nil
 }
 
