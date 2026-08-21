@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"context"
 	"testing"
 )
 
@@ -77,6 +78,24 @@ func TestConfigStructure(t *testing.T) {
 
 	if cfg.WorkerImage != "stream-monitor-worker" {
 		t.Errorf("Config.WorkerImage = %v, want stream-monitor-worker", cfg.WorkerImage)
+	}
+}
+
+// TestCreateWorkerPodRejectsEmptyOwnerUID verifies that CreateWorkerPod
+// fails fast with a clear error when OwnerUID is empty, instead of letting
+// the Kubernetes API server reject the Pod create with a less obvious
+// validation error (the API server requires ownerReferences[].uid to be
+// non-empty). The zero-value Client (nil clientset) is safe to use here
+// because the empty-OwnerUID check happens before any use of c.clientset.
+func TestCreateWorkerPodRejectsEmptyOwnerUID(t *testing.T) {
+	c := &Client{namespace: "default"}
+	_, err := c.CreateWorkerPod(context.Background(), CreatePodParams{
+		MonitorID: "mon-123",
+		OwnerName: "mon-123",
+		OwnerUID:  "",
+	})
+	if err == nil {
+		t.Fatal("CreateWorkerPod() with empty OwnerUID = nil error, want an error")
 	}
 }
 

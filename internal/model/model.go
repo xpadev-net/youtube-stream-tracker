@@ -102,7 +102,20 @@ type Monitor struct {
 	Status      MonitorStatus   `json:"status"`
 	PodName     *string         `json:"pod_name,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	// UpdatedAt currently always equals CreatedAt: internal/k8s/store's
+	// conversion from a StreamMonitor object populates both from
+	// metadata.creationTimestamp, because the StreamMonitor CRD schema (see
+	// helm/stream-monitor/crds/streammonitor-crd.yaml) has no field
+	// tracking a live last-modified time the way the old Postgres
+	// `monitors.updated_at` column did — the built-in metadata.
+	// resourceVersion changes on every write but is an opaque string, not
+	// a timestamp. No API response currently serializes this field. If a
+	// real update timestamp is needed later, add a status field (e.g.
+	// `status.lastUpdatedAt`) to the CRD and set it on every status/spec
+	// write path in internal/k8s/store, keeping in mind that changing the
+	// CRD schema requires a manual `kubectl apply` on already-installed
+	// clusters (Helm's crds/ directory is not touched by `helm upgrade`).
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // MonitorStats represents monitoring statistics.

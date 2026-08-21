@@ -224,3 +224,34 @@ func TestDeleteNotFound(t *testing.T) {
 		t.Fatalf("Delete() error = %v, want ErrMonitorNotFound", err)
 	}
 }
+
+// TestListNegativeOffsetDoesNotPanic guards against a slice-bounds panic:
+// a negative Offset (e.g. forwarded unchecked from a malformed
+// ?offset=-1 query parameter) must be clamped to zero rather than passed
+// straight into monitors[start:end].
+func TestListNegativeOffsetDoesNotPanic(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.Create(ctx, CreateMonitorParams{
+		ID:           "mon-1",
+		StreamURL:    "https://www.youtube.com/watch?v=neg-offset",
+		CallbackURL:  "https://example.com/cb",
+		Config:       model.DefaultMonitorConfig(),
+		InitialPhase: model.StatusInitializing,
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	waitInCache(t, s, "mon-1")
+
+	monitors, total, err := s.List(ctx, ListParams{Offset: -1})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total = %d, want 1", total)
+	}
+	if len(monitors) != 1 {
+		t.Fatalf("len(monitors) = %d, want 1", len(monitors))
+	}
+}

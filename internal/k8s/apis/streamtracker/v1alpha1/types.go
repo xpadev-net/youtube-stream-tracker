@@ -12,6 +12,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,13 +36,20 @@ var GVR = SchemeGroupVersion.WithResource(Plural)
 // StreamMonitorSpec is the desired-state (writable by the API's
 // create/patch handlers) part of a StreamMonitor object.
 type StreamMonitorSpec struct {
-	StreamURL              string                `json:"streamURL"`
-	CallbackURL            string                `json:"callbackURL"`
-	CheckIntervalSec       int                   `json:"checkIntervalSec"`
-	BlackoutThresholdSec   int                   `json:"blackoutThresholdSec"`
-	SilenceThresholdSec    int                   `json:"silenceThresholdSec"`
-	SilenceDBThreshold     float64               `json:"silenceDBThreshold"`
-	ScheduledStartTime     *metav1.Time          `json:"scheduledStartTime,omitempty"`
+	StreamURL            string       `json:"streamURL"`
+	CallbackURL          string       `json:"callbackURL"`
+	CheckIntervalSec     int          `json:"checkIntervalSec"`
+	BlackoutThresholdSec int          `json:"blackoutThresholdSec"`
+	SilenceThresholdSec  int          `json:"silenceThresholdSec"`
+	SilenceDBThreshold   float64      `json:"silenceDBThreshold"`
+	ScheduledStartTime   *metav1.Time `json:"scheduledStartTime,omitempty"`
+	// ScheduledEndTime is defined in the CRD schema now (see the Decision
+	// Log in docs/coding-agent/plans/01-streammonitor-crd-migration.md on
+	// shipping the full schema up front) but is not yet wired up: nothing
+	// in internal/k8s/store writes or reads it, because model.MonitorConfig
+	// has no corresponding field yet. Plan 2
+	// (docs/coding-agent/plans/02-streammonitor-scheduled-reservations.md)
+	// adds that field and the read/write paths together.
 	ScheduledEndTime       *metav1.Time          `json:"scheduledEndTime,omitempty"`
 	StartDelayToleranceSec int                   `json:"startDelayToleranceSec"`
 	Metadata               *runtime.RawExtension `json:"metadata,omitempty"`
@@ -83,10 +91,23 @@ type StreamMonitorList struct {
 // Log for why. It is required so *StreamMonitor and *StreamMonitorList
 // satisfy the runtime.Object interface (TypeMeta already provides
 // GetObjectKind/SetGroupVersionKind).
+//
+// Marshal/Unmarshal errors are not possible in practice for this plain,
+// non-cyclic struct (its only "unusual" field, *runtime.RawExtension, is
+// itself JSON-safe by construction), but the runtime.Object interface
+// gives DeepCopyObject no way to report an error to its caller, so a
+// failure here would otherwise be silently swallowed and hand back an
+// incorrect empty copy. Panic instead: it can only mean a bug in this
+// struct's shape, not bad input from a cluster or a user.
 func (m *StreamMonitor) DeepCopyObject() runtime.Object {
 	out := &StreamMonitor{}
-	b, _ := json.Marshal(m)
-	_ = json.Unmarshal(b, out)
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(fmt.Sprintf("v1alpha1: StreamMonitor.DeepCopyObject: marshal: %v", err))
+	}
+	if err := json.Unmarshal(b, out); err != nil {
+		panic(fmt.Sprintf("v1alpha1: StreamMonitor.DeepCopyObject: unmarshal: %v", err))
+	}
 	return out
 }
 
@@ -94,7 +115,12 @@ func (m *StreamMonitor) DeepCopyObject() runtime.Object {
 // note on StreamMonitor.DeepCopyObject above.
 func (l *StreamMonitorList) DeepCopyObject() runtime.Object {
 	out := &StreamMonitorList{}
-	b, _ := json.Marshal(l)
-	_ = json.Unmarshal(b, out)
+	b, err := json.Marshal(l)
+	if err != nil {
+		panic(fmt.Sprintf("v1alpha1: StreamMonitorList.DeepCopyObject: marshal: %v", err))
+	}
+	if err := json.Unmarshal(b, out); err != nil {
+		panic(fmt.Sprintf("v1alpha1: StreamMonitorList.DeepCopyObject: unmarshal: %v", err))
+	}
 	return out
 }

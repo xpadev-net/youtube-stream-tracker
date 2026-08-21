@@ -362,9 +362,12 @@ func (h *Handler) ListMonitors(c *gin.Context) {
 	}
 
 	if offsetStr := c.Query("offset"); offsetStr != "" {
-		if offset, err := strconv.Atoi(offsetStr); err == nil {
-			params.Offset = offset
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil || offset < 0 {
+			httpapi.RespondValidationError(c, "Invalid offset value")
+			return
 		}
+		params.Offset = offset
 	}
 
 	monitors, total, err := h.repo.List(c.Request.Context(), params)

@@ -845,7 +845,8 @@ func (w *Worker) reportStatusUpdate(ctx context.Context) {
 	}
 }
 
-// getVideoHealth returns the current video health status.
+// getVideoHealth returns the current video health status. Callers must
+// hold w.mu (its only caller, reportStatusUpdate, does).
 func (w *Worker) getVideoHealth() string {
 	if w.blackoutStart != nil {
 		return string(model.HealthWarning)
@@ -853,7 +854,8 @@ func (w *Worker) getVideoHealth() string {
 	return string(model.HealthOK)
 }
 
-// getAudioHealth returns the current audio health status.
+// getAudioHealth returns the current audio health status. Callers must
+// hold w.mu (its only caller, reportStatusUpdate, does).
 func (w *Worker) getAudioHealth() string {
 	if w.silenceStart != nil {
 		return string(model.HealthWarning)

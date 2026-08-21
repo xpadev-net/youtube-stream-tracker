@@ -9,7 +9,7 @@ YouTube Stream Tracker
 - 主なユースケース: モニタの登録 → Kubernetes 上に Worker Pod が立ち上がりストリームを監視 → 異常を検知したら Webhook 送信
 
 主なファイル
-- `cmd/gateway/main.go` - API Gateway のエントリポイント（HTTP サーバ、DB接続、Kubernetes リコンシリエータ）
+- `cmd/gateway/main.go` - API Gateway のエントリポイント（HTTP サーバ、`StreamMonitor` ストア、Kubernetes リコンシリエータ）
 - `cmd/worker/main.go` - Worker のエントリポイント（個別監視ジョブ）
 - `internal/worker/worker.go` - Worker の主要ロジック（待機→監視→解析→Webhook 送信）
 - `internal/api/handlers.go` - Gateway の HTTP ハンドラ（モニタ作成、取得、停止、内部ステータス更新）
@@ -21,13 +21,14 @@ YouTube Stream Tracker
 - `docker-compose.yaml`, `Dockerfile.*`, `helm/` - デプロイやローカル起動に関する定義
 
 クイックスタート（ローカル、Docker Compose）
-1. 環境変数を用意します（最低限）:
-   - Gateway: `API_KEY`、`INTERNAL_API_KEY`、`WEBHOOK_SIGNING_KEY`（Kubernetes クラスタへの到達性が必要です。Gateway は起動時に `StreamMonitor` CRD にアクセスします）
+1. 前提条件: Gateway は起動時に Kubernetes API サーバへ接続し、`StreamMonitor` カスタムリソースを list/watch します。あらかじめ到達可能な Kubernetes クラスタ（`kind` 等でも可）を用意し、`kubectl apply -f helm/stream-monitor/crds/streammonitor-crd.yaml` で CRD を導入し、Gateway プロセスから `~/.kube/config`（`KUBECONFIG` 環境変数でパス変更可）または `IN_CLUSTER=true` でクラスタ内 ServiceAccount を使って認証できるようにしてください。CRD が未導入のクラスタでは `GET /readyz` が失敗し続けます。
+2. 環境変数を用意します（最低限）:
+   - Gateway: `API_KEY`、`INTERNAL_API_KEY`、`WEBHOOK_SIGNING_KEY`、`NAMESPACE`（`StreamMonitor` を作成する namespace。既定は `default`）
    - Worker（個別起動時）: `MONITOR_ID`、`STREAM_URL`、`CALLBACK_URL`、`INTERNAL_API_KEY`、`WEBHOOK_URL`、`WEBHOOK_SIGNING_KEY`
-2. docker-compose を利用する場合:
-   - `docker-compose up --build` で Gateway / Worker を立ち上げます（compose ファイルを確認してください）。データベースはありません。
-3. Gateway が起動したらヘルスチェック:
-   - `GET /healthz` と `GET /readyz` を確認します。
+3. docker-compose を利用する場合:
+   - `docker-compose up --build` で Gateway / Worker を立ち上げます（compose ファイルを確認してください）。データベースはありません。手順 1 の Kubernetes クラスタ・CRD・kubeconfig は別途用意する必要があります。
+4. Gateway が起動したらヘルスチェック:
+   - `GET /healthz` と `GET /readyz` を確認します（`/readyz` は `StreamMonitor` の informer キャッシュが同期済みであることを確認します）。
 
 API（外部）
 - Base: `/api/v1` （`API_KEY` による認可が必要）

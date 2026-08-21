@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 
+	"github.com/xpadev-net/youtube-stream-tracker/internal/k8s/apis/streamtracker/v1alpha1"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
 	"go.uber.org/zap"
@@ -132,6 +133,15 @@ type CreatePodParams struct {
 func (c *Client) CreateWorkerPod(ctx context.Context, params CreatePodParams) (*corev1.Pod, error) {
 	podName := PodNamePrefix + params.MonitorID
 
+	// Kubernetes rejects an ownerReference with an empty UID outright (the
+	// garbage collector relies on the UID, not just the name, to identify
+	// the owner unambiguously across delete/recreate). Fail fast here with
+	// a clear error instead of letting the API server reject the Pod
+	// create below with a much less obvious validation error.
+	if params.OwnerUID == "" {
+		return nil, fmt.Errorf("create worker pod: OwnerUID must not be empty (owner name %q)", params.OwnerName)
+	}
+
 	// Serialize config to JSON
 	configJSON, err := json.Marshal(params.Config)
 	if err != nil {
@@ -204,8 +214,8 @@ func (c *Client) CreateWorkerPod(ctx context.Context, params CreatePodParams) (*
 				LabelMonitorID: params.MonitorID,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion:         "streamtracker.xpadev.net/v1alpha1",
-				Kind:               "StreamMonitor",
+				APIVersion:         v1alpha1.SchemeGroupVersion.String(),
+				Kind:               v1alpha1.Kind,
 				Name:               params.OwnerName,
 				UID:                params.OwnerUID,
 				BlockOwnerDeletion: boolPtr(true),

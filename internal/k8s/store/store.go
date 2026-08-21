@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/xpadev-net/youtube-stream-tracker/internal/k8s/apis/streamtracker/v1alpha1"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
@@ -208,6 +210,17 @@ func (s *Store) Create(ctx context.Context, p CreateMonitorParams) (*model.Monit
 	}
 	updated, err := s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
 	if err != nil {
+		// Roll back the orphaned object: with an empty status.phase it is
+		// invisible to the phase index, so it would never show up in
+		// GetActiveMonitors/CountActiveMonitors, and the duplicate check
+		// above (which requires an active phase) would not block a retry
+		// for the same stream URL either — nothing else would ever clean
+		// this object up otherwise.
+		delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if delErr := s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).Delete(delCtx, p.ID, metav1.DeleteOptions{}); delErr != nil && !k8serrors.IsNotFound(delErr) {
+			return nil, fmt.Errorf("set initial status: %w (rollback delete failed: %v)", err, delErr)
+		}
 		return nil, fmt.Errorf("set initial status: %w", err)
 	}
 
@@ -338,6 +351,9 @@ func (s *Store) List(ctx context.Context, p ListParams) ([]*model.Monitor, int, 
 	total := len(monitors)
 
 	start := p.Offset
+	if start < 0 {
+		start = 0
+	}
 	if start > total {
 		start = total
 	}
@@ -350,16 +366,26 @@ func (s *Store) List(ctx context.Context, p ListParams) ([]*model.Monitor, int, 
 }
 
 // UpdateStatus unconditionally sets status.phase for the given monitor.
+// The live object is re-read on every attempt so that a concurrent writer
+// (the worker's status callback, the reconciler, the pod watcher can all
+// touch the same object) only causes a retry with a fresh resourceVersion,
+// not an HTTP 409 Conflict surfacing to the caller — unlike
+// UpdateStatusWithCondition, a 409 here is not a "someone else already
+// handled it" signal, since this method has no condition to have raced on.
 func (s *Store) UpdateStatus(ctx context.Context, id string, status model.MonitorStatus) error {
-	live, err := s.getLive(ctx, id)
-	if err != nil {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		live, err := s.getLive(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := unstructured.SetNestedField(live.Object, string(status), "status", "phase"); err != nil {
+			return fmt.Errorf("set phase: %w", err)
+		}
+		_, err = s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).UpdateStatus(ctx, live, metav1.UpdateOptions{})
 		return err
-	}
-	if err := unstructured.SetNestedField(live.Object, string(status), "status", "phase"); err != nil {
-		return fmt.Errorf("set phase: %w", err)
-	}
-	if _, err := s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).UpdateStatus(ctx, live, metav1.UpdateOptions{}); err != nil {
-		if k8serrors.IsNotFound(err) {
+	})
+	if err != nil {
+		if errors.Is(err, ErrMonitorNotFound) || k8serrors.IsNotFound(err) {
 			return ErrMonitorNotFound
 		}
 		return fmt.Errorf("update status: %w", err)
@@ -407,17 +433,22 @@ func (s *Store) UpdateStatusWithCondition(ctx context.Context, id string, curren
 	return true, nil
 }
 
-// UpdatePodName sets status.podName for the given monitor.
+// UpdatePodName sets status.podName for the given monitor, retrying on a
+// conflicting concurrent write (see UpdateStatus's comment).
 func (s *Store) UpdatePodName(ctx context.Context, id string, podName string) error {
-	live, err := s.getLive(ctx, id)
-	if err != nil {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		live, err := s.getLive(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := unstructured.SetNestedField(live.Object, podName, "status", "podName"); err != nil {
+			return fmt.Errorf("set pod name: %w", err)
+		}
+		_, err = s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).UpdateStatus(ctx, live, metav1.UpdateOptions{})
 		return err
-	}
-	if err := unstructured.SetNestedField(live.Object, podName, "status", "podName"); err != nil {
-		return fmt.Errorf("set pod name: %w", err)
-	}
-	if _, err := s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).UpdateStatus(ctx, live, metav1.UpdateOptions{}); err != nil {
-		if k8serrors.IsNotFound(err) {
+	})
+	if err != nil {
+		if errors.Is(err, ErrMonitorNotFound) || k8serrors.IsNotFound(err) {
 			return ErrMonitorNotFound
 		}
 		return fmt.Errorf("update pod name: %w", err)
@@ -426,48 +457,64 @@ func (s *Store) UpdatePodName(ctx context.Context, id string, podName string) er
 }
 
 // UpdateStats sets the status fields tracked by model.MonitorStats for
-// stats.MonitorID.
+// stats.MonitorID, retrying on a conflicting concurrent write (see
+// UpdateStatus's comment). The three enum-typed fields (videoHealth,
+// audioHealth, streamStatus) are only written when non-empty: a caller
+// (e.g. the internal status-update handler on a partial request body) may
+// pass a MonitorStats with some of these left as the zero value to mean
+// "leave unchanged," and the CRD schema rejects an empty string for these
+// enum fields outright — writing "" would fail the whole update.
 func (s *Store) UpdateStats(ctx context.Context, stats *model.MonitorStats) error {
-	live, err := s.getLive(ctx, stats.MonitorID)
-	if err != nil {
-		return err
-	}
-
-	if err := unstructured.SetNestedField(live.Object, int64(stats.TotalSegments), "status", "totalSegments"); err != nil {
-		return fmt.Errorf("set totalSegments: %w", err)
-	}
-	if err := unstructured.SetNestedField(live.Object, int64(stats.BlackoutEvents), "status", "blackoutEvents"); err != nil {
-		return fmt.Errorf("set blackoutEvents: %w", err)
-	}
-	if err := unstructured.SetNestedField(live.Object, int64(stats.SilenceEvents), "status", "silenceEvents"); err != nil {
-		return fmt.Errorf("set silenceEvents: %w", err)
-	}
-	if err := unstructured.SetNestedField(live.Object, string(stats.VideoHealth), "status", "videoHealth"); err != nil {
-		return fmt.Errorf("set videoHealth: %w", err)
-	}
-	if err := unstructured.SetNestedField(live.Object, string(stats.AudioHealth), "status", "audioHealth"); err != nil {
-		return fmt.Errorf("set audioHealth: %w", err)
-	}
-	if err := unstructured.SetNestedField(live.Object, string(stats.StreamStatus), "status", "streamStatus"); err != nil {
-		return fmt.Errorf("set streamStatus: %w", err)
-	}
-	if stats.LastCheckAt != nil {
-		ts := metav1.NewTime(*stats.LastCheckAt)
-		b, err := json.Marshal(ts)
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		live, err := s.getLive(ctx, stats.MonitorID)
 		if err != nil {
-			return fmt.Errorf("marshal lastCheckAt: %w", err)
+			return err
 		}
-		var raw string
-		if err := json.Unmarshal(b, &raw); err != nil {
-			return fmt.Errorf("unmarshal lastCheckAt: %w", err)
-		}
-		if err := unstructured.SetNestedField(live.Object, raw, "status", "lastCheckAt"); err != nil {
-			return fmt.Errorf("set lastCheckAt: %w", err)
-		}
-	}
 
-	if _, err := s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).UpdateStatus(ctx, live, metav1.UpdateOptions{}); err != nil {
-		if k8serrors.IsNotFound(err) {
+		if err := unstructured.SetNestedField(live.Object, int64(stats.TotalSegments), "status", "totalSegments"); err != nil {
+			return fmt.Errorf("set totalSegments: %w", err)
+		}
+		if err := unstructured.SetNestedField(live.Object, int64(stats.BlackoutEvents), "status", "blackoutEvents"); err != nil {
+			return fmt.Errorf("set blackoutEvents: %w", err)
+		}
+		if err := unstructured.SetNestedField(live.Object, int64(stats.SilenceEvents), "status", "silenceEvents"); err != nil {
+			return fmt.Errorf("set silenceEvents: %w", err)
+		}
+		if stats.VideoHealth != "" {
+			if err := unstructured.SetNestedField(live.Object, string(stats.VideoHealth), "status", "videoHealth"); err != nil {
+				return fmt.Errorf("set videoHealth: %w", err)
+			}
+		}
+		if stats.AudioHealth != "" {
+			if err := unstructured.SetNestedField(live.Object, string(stats.AudioHealth), "status", "audioHealth"); err != nil {
+				return fmt.Errorf("set audioHealth: %w", err)
+			}
+		}
+		if stats.StreamStatus != "" {
+			if err := unstructured.SetNestedField(live.Object, string(stats.StreamStatus), "status", "streamStatus"); err != nil {
+				return fmt.Errorf("set streamStatus: %w", err)
+			}
+		}
+		if stats.LastCheckAt != nil {
+			ts := metav1.NewTime(*stats.LastCheckAt)
+			b, err := json.Marshal(ts)
+			if err != nil {
+				return fmt.Errorf("marshal lastCheckAt: %w", err)
+			}
+			var raw string
+			if err := json.Unmarshal(b, &raw); err != nil {
+				return fmt.Errorf("unmarshal lastCheckAt: %w", err)
+			}
+			if err := unstructured.SetNestedField(live.Object, raw, "status", "lastCheckAt"); err != nil {
+				return fmt.Errorf("set lastCheckAt: %w", err)
+			}
+		}
+
+		_, err = s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).UpdateStatus(ctx, live, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		if errors.Is(err, ErrMonitorNotFound) || k8serrors.IsNotFound(err) {
 			return ErrMonitorNotFound
 		}
 		return fmt.Errorf("update stats: %w", err)
@@ -536,69 +583,82 @@ type UpdateMonitorParams struct {
 
 // UpdateMonitor updates an active monitor's spec.callbackURL and/or spec
 // config fields. Returns ErrMonitorNotFound if the monitor doesn't exist,
-// or ErrMonitorNotActive if it exists but isn't in an active state.
+// or ErrMonitorNotActive if it exists but isn't in an active state. Retries
+// on a conflicting concurrent write (see UpdateStatus's comment), re-reading
+// the live object — and re-checking it is still active — on every attempt.
 func (s *Store) UpdateMonitor(ctx context.Context, id string, p UpdateMonitorParams) (*model.Monitor, error) {
-	live, err := s.getLive(ctx, id)
-	if err != nil {
-		return nil, err
-	}
+	var result *model.Monitor
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		live, err := s.getLive(ctx, id)
+		if err != nil {
+			return err
+		}
 
-	phase, found, err := unstructured.NestedString(live.Object, "status", "phase")
-	if err != nil {
-		return nil, fmt.Errorf("read phase: %w", err)
-	}
-	if !found || !model.MonitorStatus(phase).IsActive() {
-		return nil, ErrMonitorNotActive
-	}
+		phase, found, err := unstructured.NestedString(live.Object, "status", "phase")
+		if err != nil {
+			return fmt.Errorf("read phase: %w", err)
+		}
+		if !found || !model.MonitorStatus(phase).IsActive() {
+			return ErrMonitorNotActive
+		}
 
-	if p.CallbackURL != nil {
-		if err := unstructured.SetNestedField(live.Object, *p.CallbackURL, "spec", "callbackURL"); err != nil {
-			return nil, fmt.Errorf("set callbackURL: %w", err)
-		}
-	}
-	if p.Config != nil {
-		if err := unstructured.SetNestedField(live.Object, int64(p.Config.CheckIntervalSec), "spec", "checkIntervalSec"); err != nil {
-			return nil, fmt.Errorf("set checkIntervalSec: %w", err)
-		}
-		if err := unstructured.SetNestedField(live.Object, int64(p.Config.BlackoutThresholdSec), "spec", "blackoutThresholdSec"); err != nil {
-			return nil, fmt.Errorf("set blackoutThresholdSec: %w", err)
-		}
-		if err := unstructured.SetNestedField(live.Object, int64(p.Config.SilenceThresholdSec), "spec", "silenceThresholdSec"); err != nil {
-			return nil, fmt.Errorf("set silenceThresholdSec: %w", err)
-		}
-		if err := unstructured.SetNestedField(live.Object, p.Config.SilenceDBThreshold, "spec", "silenceDBThreshold"); err != nil {
-			return nil, fmt.Errorf("set silenceDBThreshold: %w", err)
-		}
-		if err := unstructured.SetNestedField(live.Object, int64(p.Config.StartDelayToleranceSec), "spec", "startDelayToleranceSec"); err != nil {
-			return nil, fmt.Errorf("set startDelayToleranceSec: %w", err)
-		}
-		if p.Config.ScheduledStartTime != nil {
-			mt := metav1.NewTime(*p.Config.ScheduledStartTime)
-			b, err := json.Marshal(mt)
-			if err != nil {
-				return nil, fmt.Errorf("marshal scheduledStartTime: %w", err)
-			}
-			var raw string
-			if err := json.Unmarshal(b, &raw); err != nil {
-				return nil, fmt.Errorf("unmarshal scheduledStartTime: %w", err)
-			}
-			if err := unstructured.SetNestedField(live.Object, raw, "spec", "scheduledStartTime"); err != nil {
-				return nil, fmt.Errorf("set scheduledStartTime: %w", err)
+		if p.CallbackURL != nil {
+			if err := unstructured.SetNestedField(live.Object, *p.CallbackURL, "spec", "callbackURL"); err != nil {
+				return fmt.Errorf("set callbackURL: %w", err)
 			}
 		}
-	}
+		if p.Config != nil {
+			if err := unstructured.SetNestedField(live.Object, int64(p.Config.CheckIntervalSec), "spec", "checkIntervalSec"); err != nil {
+				return fmt.Errorf("set checkIntervalSec: %w", err)
+			}
+			if err := unstructured.SetNestedField(live.Object, int64(p.Config.BlackoutThresholdSec), "spec", "blackoutThresholdSec"); err != nil {
+				return fmt.Errorf("set blackoutThresholdSec: %w", err)
+			}
+			if err := unstructured.SetNestedField(live.Object, int64(p.Config.SilenceThresholdSec), "spec", "silenceThresholdSec"); err != nil {
+				return fmt.Errorf("set silenceThresholdSec: %w", err)
+			}
+			if err := unstructured.SetNestedField(live.Object, p.Config.SilenceDBThreshold, "spec", "silenceDBThreshold"); err != nil {
+				return fmt.Errorf("set silenceDBThreshold: %w", err)
+			}
+			if err := unstructured.SetNestedField(live.Object, int64(p.Config.StartDelayToleranceSec), "spec", "startDelayToleranceSec"); err != nil {
+				return fmt.Errorf("set startDelayToleranceSec: %w", err)
+			}
+			if p.Config.ScheduledStartTime != nil {
+				mt := metav1.NewTime(*p.Config.ScheduledStartTime)
+				b, err := json.Marshal(mt)
+				if err != nil {
+					return fmt.Errorf("marshal scheduledStartTime: %w", err)
+				}
+				var raw string
+				if err := json.Unmarshal(b, &raw); err != nil {
+					return fmt.Errorf("unmarshal scheduledStartTime: %w", err)
+				}
+				if err := unstructured.SetNestedField(live.Object, raw, "spec", "scheduledStartTime"); err != nil {
+					return fmt.Errorf("set scheduledStartTime: %w", err)
+				}
+			}
+		}
 
-	updated, err := s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).Update(ctx, live, metav1.UpdateOptions{})
+		updated, err := s.dyn.Resource(v1alpha1.GVR).Namespace(s.namespace).Update(ctx, live, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+
+		sm, err := fromUnstructured(updated)
+		if err != nil {
+			return fmt.Errorf("convert from unstructured: %w", err)
+		}
+		result = toMonitor(sm)
+		return nil
+	})
 	if err != nil {
-		if k8serrors.IsNotFound(err) {
+		if errors.Is(err, ErrMonitorNotActive) {
+			return nil, ErrMonitorNotActive
+		}
+		if errors.Is(err, ErrMonitorNotFound) || k8serrors.IsNotFound(err) {
 			return nil, ErrMonitorNotFound
 		}
 		return nil, fmt.Errorf("update StreamMonitor: %w", err)
 	}
-
-	sm, err := fromUnstructured(updated)
-	if err != nil {
-		return nil, fmt.Errorf("convert from unstructured: %w", err)
-	}
-	return toMonitor(sm), nil
+	return result, nil
 }
