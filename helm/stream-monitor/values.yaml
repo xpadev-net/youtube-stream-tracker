@@ -32,19 +32,6 @@ worker:
       cpu: 200m
       memory: 256Mi
 
-# PostgreSQL configuration
-postgresql:
-  # Set to true to deploy PostgreSQL as part of this chart
-  enabled: false
-  # External PostgreSQL connection
-  host: ""
-  port: 5432
-  database: stream_monitor
-  username: stream_monitor
-  # Password should be provided via secret
-  existingSecret: ""
-  existingSecretKey: "password"
-
 # Secrets
 secrets:
   # API key for external clients

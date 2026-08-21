@@ -22,14 +22,11 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
-  # Owner reference resolution for worker pod ownerReferences
-  - apiGroups: ["apps"]
-    resources: ["replicasets", "deployments"]
-    verbs: ["get"]
-  # Required by OwnerReferencesPermissionEnforcement for blockOwnerDeletion
-  - apiGroups: ["apps"]
-    resources: ["deployments/finalizers"]
-    verbs: ["update"]
+  # StreamMonitor custom resource management — this is now the only store
+  # of monitor state (see helm/stream-monitor/crds/streammonitor-crd.yaml)
+  - apiGroups: ["streamtracker.xpadev.net"]
+    resources: ["streammonitors", "streammonitors/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

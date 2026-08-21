@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/validation"
 )
 
@@ -55,7 +55,7 @@ type StatusRequest struct {
 }
 
 // ReportStatus reports the current status to the gateway.
-func (c *CallbackClient) ReportStatus(ctx context.Context, monitorID string, status db.MonitorStatus, update *StatusUpdate) error {
+func (c *CallbackClient) ReportStatus(ctx context.Context, monitorID string, status model.MonitorStatus, update *StatusUpdate) error {
 	// Internal callbacks are expected to target the in-cluster gateway service.
 	if err := validation.ValidateOutboundURL(ctx, c.baseURL, true); err != nil {
 		return fmt.Errorf("invalid internal callback url: %w", err)
@@ -128,39 +128,6 @@ func (c *CallbackClient) TerminateMonitor(ctx context.Context, monitorID string,
 	body, err := json.Marshal(map[string]string{
 		"reason": reason,
 	})
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Internal-API-Key", c.internalAPIKey)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("gateway returned status %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
-// ReportWebhookEvent reports a webhook delivery result to the gateway for audit logging.
-func (c *CallbackClient) ReportWebhookEvent(ctx context.Context, monitorID string, event *WebhookEventReport) error {
-	if err := validation.ValidateOutboundURL(ctx, c.baseURL, true); err != nil {
-		return fmt.Errorf("invalid internal callback url: %w", err)
-	}
-	url := fmt.Sprintf("%s/internal/v1/monitors/%s/events", c.baseURL, monitorID)
-
-	body, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}

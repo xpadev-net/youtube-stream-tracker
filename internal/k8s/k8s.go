@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -20,8 +19,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
 	"go.uber.org/zap"
 )
 
@@ -42,7 +41,6 @@ type Client struct {
 	namespace   string
 	workerImage string
 	workerTag   string
-	ownerRef    *metav1.OwnerReference
 }
 
 // Config holds configuration for creating a K8s client.
@@ -54,27 +52,40 @@ type Config struct {
 	WorkerImageTag string
 }
 
-// NewClient creates a new Kubernetes client.
-func NewClient(cfg Config) (*Client, error) {
-	var config *rest.Config
-	var err error
-
+// BuildRESTConfig builds the *rest.Config used to talk to the Kubernetes
+// API server, either the in-cluster config (when running as a Pod) or a
+// kubeconfig file (for local development). Both the typed *kubernetes.
+// Clientset (used for Pod management, see NewClient) and the dynamic.
+// Interface (used for StreamMonitor access, see internal/k8s/store) are
+// built from this same config, so this is the single place that decides
+// how to reach the cluster.
+func BuildRESTConfig(cfg Config) (*rest.Config, error) {
 	if cfg.InCluster {
-		config, err = rest.InClusterConfig()
+		config, err := rest.InClusterConfig()
 		if err != nil {
 			return nil, fmt.Errorf("create in-cluster config: %w", err)
 		}
-	} else {
-		kubeconfig := cfg.KubeConfigPath
-		if kubeconfig == "" {
-			if home := homedir.HomeDir(); home != "" {
-				kubeconfig = filepath.Join(home, ".kube", "config")
-			}
+		return config, nil
+	}
+
+	kubeconfig := cfg.KubeConfigPath
+	if kubeconfig == "" {
+		if home := homedir.HomeDir(); home != "" {
+			kubeconfig = filepath.Join(home, ".kube", "config")
 		}
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-		if err != nil {
-			return nil, fmt.Errorf("create out-of-cluster config: %w", err)
-		}
+	}
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("create out-of-cluster config: %w", err)
+	}
+	return config, nil
+}
+
+// NewClient creates a new Kubernetes client.
+func NewClient(cfg Config) (*Client, error) {
+	config, err := BuildRESTConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
@@ -95,90 +106,6 @@ func NewClient(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// SetOwnerReference sets the owner reference to be applied to worker pods.
-func (c *Client) SetOwnerReference(ref *metav1.OwnerReference) {
-	c.ownerRef = ref
-}
-
-// ResolveOwnerDeployment resolves the owner Deployment by traversing the
-// owner chain: Pod → ReplicaSet → Deployment. Returns an error if the
-// chain cannot be resolved (e.g., pod is not managed by a Deployment).
-func (c *Client) ResolveOwnerDeployment(ctx context.Context, podName string) (*metav1.OwnerReference, error) {
-	// Get the gateway pod
-	pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, podName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("get gateway pod %q: %w", podName, err)
-	}
-
-	// Find the ReplicaSet owner
-	rsRef := findOwnerReference(pod.OwnerReferences, "ReplicaSet")
-	if rsRef == nil {
-		return nil, fmt.Errorf("gateway pod %q has no ReplicaSet owner", podName)
-	}
-
-	// Get the ReplicaSet
-	rs, err := c.clientset.AppsV1().ReplicaSets(c.namespace).Get(ctx, rsRef.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("get ReplicaSet %q: %w", rsRef.Name, err)
-	}
-
-	// Find the Deployment owner
-	deployRef := findOwnerReference(rs.OwnerReferences, "Deployment")
-	if deployRef == nil {
-		return nil, fmt.Errorf("ReplicaSet %q has no Deployment owner", rsRef.Name)
-	}
-
-	// Get the Deployment to confirm it exists and get its UID
-	deploy, err := c.clientset.AppsV1().Deployments(c.namespace).Get(ctx, deployRef.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("get Deployment %q: %w", deployRef.Name, err)
-	}
-
-	return buildDeploymentOwnerReference(deploy), nil
-}
-
-// buildOwnerReferences returns the ownerReferences slice for worker pods.
-// Returns nil if no owner reference is set.
-func (c *Client) buildOwnerReferences() []metav1.OwnerReference {
-	if c.ownerRef == nil {
-		return nil
-	}
-	return []metav1.OwnerReference{*c.ownerRef}
-}
-
-// findOwnerReference finds the first owner reference with the given kind.
-func findOwnerReference(refs []metav1.OwnerReference, kind string) *metav1.OwnerReference {
-	for i := range refs {
-		if refs[i].Kind == kind {
-			return &refs[i]
-		}
-	}
-	return nil
-}
-
-// buildDeploymentOwnerReference constructs an OwnerReference from a Deployment.
-func buildDeploymentOwnerReference(deploy *appsv1.Deployment) *metav1.OwnerReference {
-	return &metav1.OwnerReference{
-		APIVersion:         "apps/v1",
-		Kind:               "Deployment",
-		Name:               deploy.Name,
-		UID:                deploy.UID,
-		BlockOwnerDeletion: boolPtr(true),
-	}
-}
-
-// BuildOwnerReference constructs an OwnerReference from the given parameters.
-// Exported for testing purposes.
-func BuildOwnerReference(name string, uid types.UID) *metav1.OwnerReference {
-	return &metav1.OwnerReference{
-		APIVersion:         "apps/v1",
-		Kind:               "Deployment",
-		Name:               name,
-		UID:                uid,
-		BlockOwnerDeletion: boolPtr(true),
-	}
-}
-
 // CreatePodParams contains parameters for creating a worker pod.
 type CreatePodParams struct {
 	MonitorID             string
@@ -187,13 +114,18 @@ type CreatePodParams struct {
 	InternalAPIKey        string
 	WebhookURL            string
 	WebhookSigningKey     string
-	Config                *db.MonitorConfig
+	Config                *model.MonitorConfig
 	Metadata              json.RawMessage
 	HTTPProxy             string
 	HTTPSProxy            string
 	SecretsName           string
 	InternalAPIKeyName    string
 	WebhookSigningKeyName string
+	// OwnerUID/OwnerName identify the owning StreamMonitor custom
+	// resource, so Kubernetes' garbage collector deletes the worker Pod
+	// automatically when the StreamMonitor is deleted.
+	OwnerUID  types.UID
+	OwnerName string
 }
 
 // CreateWorkerPod creates a new worker pod for monitoring.
@@ -271,7 +203,14 @@ func (c *Client) CreateWorkerPod(ctx context.Context, params CreatePodParams) (*
 				LabelApp:       LabelAppValue,
 				LabelMonitorID: params.MonitorID,
 			},
-			OwnerReferences: c.buildOwnerReferences(),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion:         "streamtracker.xpadev.net/v1alpha1",
+				Kind:               "StreamMonitor",
+				Name:               params.OwnerName,
+				UID:                params.OwnerUID,
+				BlockOwnerDeletion: boolPtr(true),
+				Controller:         boolPtr(true),
+			}},
 		},
 		Spec: corev1.PodSpec{
 			TerminationGracePeriodSeconds: int64Ptr(30),
@@ -475,7 +414,7 @@ func (c *Client) ListWorkerPods(ctx context.Context) ([]corev1.Pod, error) {
 // WatchWorkerPods starts a watch on worker pods from the given resource version.
 func (c *Client) WatchWorkerPods(ctx context.Context, resourceVersion string) (watch.Interface, error) {
 	watcher, err := c.clientset.CoreV1().Pods(c.namespace).Watch(ctx, metav1.ListOptions{
-		LabelSelector:  workerLabelSelector(),
+		LabelSelector:   workerLabelSelector(),
 		ResourceVersion: resourceVersion,
 	})
 	if err != nil {

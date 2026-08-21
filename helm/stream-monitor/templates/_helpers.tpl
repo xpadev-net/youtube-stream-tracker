@@ -74,14 +74,3 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
-
-{{/*
-Create the database URL
-*/}}
-{{- define "stream-monitor.databaseURL" -}}
-{{- if .Values.postgresql.enabled }}
-{{- printf "postgres://%s:$(DATABASE_PASSWORD)@%s-postgresql:%d/%s?sslmode=disable" .Values.postgresql.username (include "stream-monitor.fullname" .) (int .Values.postgresql.port) .Values.postgresql.database }}
-{{- else }}
-{{- printf "postgres://%s:$(DATABASE_PASSWORD)@%s:%d/%s?sslmode=disable" .Values.postgresql.username .Values.postgresql.host (int .Values.postgresql.port) .Values.postgresql.database }}
-{{- end }}
-{{- end }}

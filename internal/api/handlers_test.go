@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/ids"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/k8s/store"
 )
 
 func TestIsValidYouTubeWatchURL(t *testing.T) {
@@ -65,7 +65,7 @@ func TestIsValidYouTubeWatchURL(t *testing.T) {
 }
 
 func TestNewHandler(t *testing.T) {
-	repo := &db.MonitorRepository{}
+	repo := &store.Store{}
 	handler := NewHandler(repo, 50, nil, "internal-key", "signing-key", "stream-monitor-secrets", "internal-api-key", "webhook-signing-key")
 
 	if handler.repo != repo {
@@ -114,7 +114,7 @@ func TestCreateMonitorRequest(t *testing.T) {
 
 func TestUpdateMonitorStatusValidation(t *testing.T) {
 	// Setup a handler with a fake repo that returns stats
-	repo := &db.MonitorRepository{}
+	repo := &store.Store{}
 	handler := NewHandler(repo, 50, nil, "internal-key", "signing-key", "stream-monitor-secrets", "internal-api-key", "webhook-signing-key")
 
 	router := setupTestRouter()
@@ -299,7 +299,7 @@ func setupTestRouter() *gin.Engine {
 // TestHandlerStructure tests that handler can be created without errors
 func TestHandlerStructure(t *testing.T) {
 	router := setupTestRouter()
-	repo := &db.MonitorRepository{}
+	repo := &store.Store{}
 
 	handler := NewHandler(repo, 50, nil, "test-key", "test-signing-key", "stream-monitor-secrets", "internal-api-key", "webhook-signing-key")
 
@@ -321,7 +321,7 @@ func TestHandlerStructure(t *testing.T) {
 
 // TestDeleteMonitorInvalidID tests that DeleteMonitor returns 404 for invalid monitor IDs.
 func TestDeleteMonitorInvalidID(t *testing.T) {
-	handler := NewHandler(&db.MonitorRepository{}, 50, nil, "key", "sign", "secrets", "ak", "sk")
+	handler := NewHandler(&store.Store{}, 50, nil, "key", "sign", "secrets", "ak", "sk")
 	router := setupTestRouter()
 	router.DELETE("/api/v1/monitors/:monitor_id", handler.DeleteMonitor)
 

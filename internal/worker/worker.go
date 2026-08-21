@@ -10,10 +10,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xpadev-net/youtube-stream-tracker/internal/config"
-	"github.com/xpadev-net/youtube-stream-tracker/internal/db"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/ffmpeg"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/log"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/manifest"
+	"github.com/xpadev-net/youtube-stream-tracker/internal/model"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/webhook"
 	"github.com/xpadev-net/youtube-stream-tracker/internal/ytdlp"
 )
@@ -53,20 +53,10 @@ type SegmentAnalyzer interface {
 	AnalyzeSegment(ctx context.Context, segmentPath string) (*ffmpeg.AnalysisResult, error)
 }
 
-// WebhookEventReport contains the result of a webhook delivery for audit logging.
-type WebhookEventReport struct {
-	EventType       webhook.EventType      `json:"event_type"`
-	WebhookStatus   db.WebhookStatus       `json:"webhook_status"`
-	WebhookAttempts int                    `json:"webhook_attempts"`
-	WebhookError    *string                `json:"webhook_error,omitempty"`
-	Payload         map[string]interface{} `json:"payload,omitempty"`
-}
-
 // CallbackReporter provides gateway internal API operations.
 type CallbackReporter interface {
-	ReportStatus(ctx context.Context, monitorID string, status db.MonitorStatus, update *StatusUpdate) error
+	ReportStatus(ctx context.Context, monitorID string, status model.MonitorStatus, update *StatusUpdate) error
 	TerminateMonitor(ctx context.Context, monitorID string, reason string) error
-	ReportWebhookEvent(ctx context.Context, monitorID string, event *WebhookEventReport) error
 }
 
 // YtDlpClient provides stream status and manifest lookup.
@@ -87,7 +77,7 @@ type Worker struct {
 	// State
 	mu                  sync.Mutex
 	state               State
-	streamStatus        db.StreamStatus
+	streamStatus        model.StreamStatus
 	currentManifestURL  string
 	lastSegmentSequence uint64
 	lastSegmentURL      string
@@ -114,7 +104,6 @@ type Worker struct {
 	shutdownRequested bool
 	shutdownCh        chan struct{}
 	cancelWork        context.CancelFunc
-	auditWg           sync.WaitGroup
 
 	// Metadata for webhooks
 	metadata json.RawMessage
@@ -157,7 +146,7 @@ func NewWorkerWithDeps(
 		webhookSender:  webhookSender,
 		callbackClient: callbackClient,
 		state:          StateWaiting,
-		streamStatus:   db.StreamStatusUnknown,
+		streamStatus:   model.StreamStatusUnknown,
 		shutdownCh:     make(chan struct{}),
 	}
 }
@@ -225,7 +214,7 @@ func (w *Worker) Run(ctx context.Context) error {
 // waitingMode checks if the stream is live and waits if not.
 func (w *Worker) waitingMode(ctx context.Context) error {
 	log.Info("entering waiting mode")
-	w.reportStatus(ctx, db.StatusWaiting, nil)
+	w.reportStatus(ctx, model.StatusWaiting, nil)
 
 	interval := w.cfg.WaitingModeInitialInterval
 	ticker := time.NewTicker(interval)
@@ -265,7 +254,7 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 		// Update stream status
 		if isLive {
 			w.mu.Lock()
-			w.streamStatus = db.StreamStatusLive
+			w.streamStatus = model.StreamStatusLive
 			w.mu.Unlock()
 
 			// Send stream started event
@@ -277,7 +266,7 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 				"title": title,
 			})
 			if w.getState() == StateError {
-				w.reportStatus(ctx, db.StatusError, nil)
+				w.reportStatus(ctx, model.StatusError, nil)
 				return fmt.Errorf("webhook delivery failed")
 			}
 
@@ -313,22 +302,22 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 			switch info.LiveStatus {
 			case "is_upcoming":
 				w.mu.Lock()
-				w.streamStatus = db.StreamStatusScheduled
+				w.streamStatus = model.StreamStatusScheduled
 				w.mu.Unlock()
 			case "was_live", "not_live":
 				// Stream ended before we could monitor it
 				w.mu.Lock()
-				w.streamStatus = db.StreamStatusEnded
+				w.streamStatus = model.StreamStatusEnded
 				w.mu.Unlock()
 				w.sendWebhook(ctx, webhook.EventStreamEnded, map[string]interface{}{
 					"reason": info.LiveStatus,
 				})
 				if w.getState() == StateError {
-					w.reportStatus(ctx, db.StatusError, nil)
+					w.reportStatus(ctx, model.StatusError, nil)
 					return fmt.Errorf("webhook delivery failed")
 				}
 				w.setState(StateCompleted)
-				w.reportStatus(ctx, db.StatusCompleted, nil)
+				w.reportStatus(ctx, model.StatusCompleted, nil)
 				return nil
 			}
 		}
@@ -346,7 +335,7 @@ func (w *Worker) waitingMode(ctx context.Context) error {
 // monitoringMode performs segment analysis.
 func (w *Worker) monitoringMode(ctx context.Context) error {
 	log.Info("entering monitoring mode")
-	w.reportStatus(ctx, db.StatusMonitoring, nil)
+	w.reportStatus(ctx, model.StatusMonitoring, nil)
 
 	// Get initial manifest URL
 	manifestURL, err := w.ytdlpClient.GetManifestURL(ctx, w.cfg.StreamURL)
@@ -413,7 +402,7 @@ func (w *Worker) monitoringMode(ctx context.Context) error {
 				if w.getState() == StateError {
 					return fmt.Errorf("webhook delivery failed")
 				}
-				w.reportStatus(ctx, db.StatusCompleted, nil)
+				w.reportStatus(ctx, model.StatusCompleted, nil)
 				return nil
 			}
 		} else {
@@ -755,30 +744,11 @@ func (w *Worker) sendWebhook(ctx context.Context, eventType webhook.EventType, d
 
 	result := w.webhookSender.Send(ctx, w.cfg.WebhookURL, payload)
 
-	// Report webhook event to gateway for audit logging (best-effort)
-	if w.callbackClient != nil {
-		// Deep-copy the map so the goroutine holds a fully independent snapshot.
-		dataCopy := deepCopyMap(data)
-		report := &WebhookEventReport{
-			EventType:       eventType,
-			WebhookStatus:   db.WebhookStatusSent,
-			WebhookAttempts: result.Attempts,
-			Payload:         dataCopy,
-		}
-		if !result.Success {
-			report.WebhookStatus = db.WebhookStatusFailed
-			errStr := result.Error
-			report.WebhookError = &errStr
-		}
-		w.auditWg.Add(1)
-		go func() {
-			defer w.auditWg.Done()
-			reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := w.callbackClient.ReportWebhookEvent(reportCtx, w.cfg.MonitorID, report); err != nil {
-				log.Warn("failed to report webhook event", zap.Error(err))
-			}
-		}()
+	if result.Success {
+		log.Info("webhook delivered",
+			zap.String("event_type", string(eventType)),
+			zap.Int("attempts", result.Attempts),
+		)
 	}
 
 	if !result.Success {
@@ -851,7 +821,7 @@ func (w *Worker) checkLiveStatus(ctx context.Context) error {
 }
 
 // reportStatus reports the current status to the gateway.
-func (w *Worker) reportStatus(ctx context.Context, status db.MonitorStatus, stats *StatusUpdate) {
+func (w *Worker) reportStatus(ctx context.Context, status model.MonitorStatus, stats *StatusUpdate) {
 	if err := w.callbackClient.ReportStatus(ctx, w.cfg.MonitorID, status, stats); err != nil {
 		log.Warn("failed to report status to gateway", zap.Error(err))
 	}
@@ -870,7 +840,7 @@ func (w *Worker) reportStatusUpdate(ctx context.Context) {
 	}
 	w.mu.Unlock()
 
-	if err := w.callbackClient.ReportStatus(ctx, w.cfg.MonitorID, db.StatusMonitoring, stats); err != nil {
+	if err := w.callbackClient.ReportStatus(ctx, w.cfg.MonitorID, model.StatusMonitoring, stats); err != nil {
 		log.Warn("failed to report status update", zap.Error(err))
 	}
 }
@@ -878,42 +848,30 @@ func (w *Worker) reportStatusUpdate(ctx context.Context) {
 // getVideoHealth returns the current video health status.
 func (w *Worker) getVideoHealth() string {
 	if w.blackoutStart != nil {
-		return string(db.HealthWarning)
+		return string(model.HealthWarning)
 	}
-	return string(db.HealthOK)
+	return string(model.HealthOK)
 }
 
 // getAudioHealth returns the current audio health status.
 func (w *Worker) getAudioHealth() string {
 	if w.silenceStart != nil {
-		return string(db.HealthWarning)
+		return string(model.HealthWarning)
 	}
-	return string(db.HealthOK)
+	return string(model.HealthOK)
 }
 
 // transitionToError handles transitioning to error state.
 func (w *Worker) transitionToError(ctx context.Context, reason string) {
 	w.setState(StateError)
-	w.reportStatus(ctx, db.StatusError, nil)
+	w.reportStatus(ctx, model.StatusError, nil)
 }
 
 // gracefulShutdown performs cleanup on shutdown.
 func (w *Worker) gracefulShutdown(ctx context.Context) error {
 	log.Info("performing graceful shutdown")
 
-	w.reportStatus(ctx, db.StatusStopped, nil)
-
-	// Wait for in-flight audit report goroutines with a bounded deadline.
-	done := make(chan struct{})
-	go func() {
-		w.auditWg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		log.Warn("timed out waiting for audit report goroutines")
-	}
+	w.reportStatus(ctx, model.StatusStopped, nil)
 
 	log.Info("graceful shutdown complete")
 	return nil
@@ -960,31 +918,4 @@ func (w *Worker) SetMetadata(metadata json.RawMessage) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.metadata = metadata
-}
-
-// deepCopyMap returns a deep copy of m via JSON round-trip so nested
-// maps/slices are fully independent of the original.
-func deepCopyMap(m map[string]interface{}) map[string]interface{} {
-	if m == nil {
-		return nil
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		log.Warn("deepCopyMap marshal failed, falling back to shallow copy", zap.Error(err))
-		return shallowCopyMap(m)
-	}
-	var cp map[string]interface{}
-	if err := json.Unmarshal(b, &cp); err != nil {
-		log.Warn("deepCopyMap unmarshal failed, falling back to shallow copy", zap.Error(err))
-		return shallowCopyMap(m)
-	}
-	return cp
-}
-
-func shallowCopyMap(m map[string]interface{}) map[string]interface{} {
-	cp := make(map[string]interface{}, len(m))
-	for k, v := range m {
-		cp[k] = v
-	}
-	return cp
 }

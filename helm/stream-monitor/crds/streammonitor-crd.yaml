@@ -1,0 +1,77 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: streammonitors.streamtracker.xpadev.net
+spec:
+  group: streamtracker.xpadev.net
+  names:
+    kind: StreamMonitor
+    listKind: StreamMonitorList
+    plural: streammonitors
+    singular: streammonitor
+    shortNames: ["smon"]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Stream Status
+          type: string
+          jsonPath: .status.streamStatus
+        - name: Pod
+          type: string
+          jsonPath: .status.podName
+        - name: Video
+          type: string
+          jsonPath: .status.videoHealth
+        - name: Audio
+          type: string
+          jsonPath: .status.audioHealth
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["streamURL", "callbackURL"]
+              properties:
+                streamURL: {type: string}
+                callbackURL: {type: string}
+                checkIntervalSec: {type: integer, minimum: 1}
+                blackoutThresholdSec: {type: integer, minimum: 0}
+                silenceThresholdSec: {type: integer, minimum: 0}
+                silenceDBThreshold: {type: number, maximum: 0}
+                scheduledStartTime: {type: string, format: date-time}
+                scheduledEndTime: {type: string, format: date-time}
+                startDelayToleranceSec: {type: integer, minimum: 0}
+                metadata: {type: object, x-kubernetes-preserve-unknown-fields: true}
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["initializing", "waiting", "monitoring", "scheduled", "completed", "stopped", "error"]
+                podName: {type: string}
+                streamStatus:
+                  type: string
+                  enum: ["unknown", "scheduled", "live", "ended"]
+                videoHealth:
+                  type: string
+                  enum: ["ok", "warning", "error", "unknown"]
+                audioHealth:
+                  type: string
+                  enum: ["ok", "warning", "error", "unknown"]
+                totalSegments: {type: integer}
+                blackoutEvents: {type: integer}
+                silenceEvents: {type: integer}
+                lastCheckAt: {type: string, format: date-time}
