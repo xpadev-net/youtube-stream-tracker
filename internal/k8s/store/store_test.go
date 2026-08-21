@@ -37,18 +37,38 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
-// waitInCache polls the informer's cache until id appears (the fake
-// client's watch delivers events asynchronously, just like a real cluster).
+// waitInCache polls the informer's cache until id appears with the
+// "initializing" status Create always sets (the fake client's watch
+// delivers events asynchronously, just like a real cluster — and Create
+// itself is two live writes, Create then UpdateStatus, so an object can
+// transiently be visible in the cache with no status yet).
 func waitInCache(t *testing.T, s *Store, id string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	waitForStatus(t, s, id, model.StatusInitializing)
+}
+
+// waitForStatus polls the informer's cache until id is visible with the
+// given status, failing the test if that doesn't happen within the
+// deadline. Any GetByID error (including ErrMonitorNotFound, expected
+// while the cache hasn't yet observed a just-created object) is retried,
+// not treated as an immediate failure.
+func waitForStatus(t *testing.T, s *Store, id string, want model.MonitorStatus) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	var lastStatus model.MonitorStatus
 	for time.Now().Before(deadline) {
-		if _, err := s.GetByID(context.Background(), id); err == nil {
+		got, err := s.GetByID(context.Background(), id)
+		if err == nil && got.Status == want {
 			return
+		}
+		lastErr = err
+		if err == nil {
+			lastStatus = got.Status
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s to appear in cache", id)
+	t.Fatalf("timed out waiting for %s status=%s in cache: lastErr=%v lastStatus=%s", id, want, lastErr, lastStatus)
 }
 
 func TestCreateAndGetByID(t *testing.T) {
@@ -138,15 +158,7 @@ func TestCreateSameStreamURLAfterTerminal(t *testing.T) {
 	if err := s.UpdateStatus(ctx, "mon-1", model.StatusCompleted); err != nil {
 		t.Fatalf("UpdateStatus() error = %v", err)
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		got, err := s.GetByID(ctx, "mon-1")
-		if err == nil && got.Status == model.StatusCompleted {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForStatus(t, s, "mon-1", model.StatusCompleted)
 
 	params.ID = "mon-2"
 	if _, err := s.Create(ctx, params); err != nil {
@@ -188,21 +200,10 @@ func TestUpdateStatusWithCondition(t *testing.T) {
 	}
 
 	// UpdateStatusWithCondition writes live; GetByID reads the informer's
-	// cache, which may take a moment to observe the write. Poll for it.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		got, err := s.GetByID(ctx, "mon-1")
-		if err != nil {
-			t.Fatalf("GetByID() error = %v", err)
-		}
-		if got.Status == model.StatusWaiting {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Status = %v, want %v (the skipped update must not have applied)", got.Status, model.StatusWaiting)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// cache, which may take a moment to observe the write. Poll for it —
+	// if the skipped update had wrongly applied, this would time out
+	// seeing "monitoring" forever instead of settling on "waiting".
+	waitForStatus(t, s, "mon-1", model.StatusWaiting)
 }
 
 func TestUpdateStatusWithConditionNotFound(t *testing.T) {
